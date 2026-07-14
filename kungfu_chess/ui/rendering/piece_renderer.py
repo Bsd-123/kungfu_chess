@@ -57,10 +57,21 @@ def _lerp(a: int, b: int, t: float) -> int:
 
 class PieceRenderer:
     def __init__(self, asset_root: str, cell_pixel_size: int,
-                 clock: Callable[[], float] = time.perf_counter):
+                 clock: Callable[[], float] = time.perf_counter,
+                 offset: Tuple[int, int] = (0, 0)):
+        """`offset = (x, y)` (task 16): screen-space pixel offset of the
+        board's top-left checkerboard cell, now that the board no
+        longer necessarily starts at frame origin (side panels + a
+        top name/score band sit to its left/above). Every other
+        calculation here (`_cell_of`, interpolation, motion state)
+        stays in board-space pixels exactly as the engine reports
+        them via `PieceSnapshot`; the offset is added once, only at
+        the final `frame.draw_on` call, so nothing upstream needs to
+        know the board has moved on screen."""
         self._library = SpriteLibrary(asset_root, cell_pixel_size)
         self._cell = cell_pixel_size
         self._clock = clock
+        self._offset = offset
         self._last_tick: Optional[float] = None
         self._tracked: Dict[Position, _Tracked] = {}
         self._fading: List[_FadingGhost] = []
@@ -118,7 +129,9 @@ class PieceRenderer:
 
             render_x, render_y = self._interpolated_position(piece)
             tracked.last_render_pos = (render_x, render_y)
-            frame.draw_on(tracked.sprite.current_frame(), render_x, render_y)
+            off_x, off_y = self._offset
+            frame.draw_on(tracked.sprite.current_frame(),
+                           render_x + off_x, render_y + off_y)
 
         # A key tracked last frame but missing now either settled
         # normally (its key just moved to the destination cell, handled
@@ -145,8 +158,10 @@ class PieceRenderer:
                 )
                 if not settled_normally:
                     ghost_x, ghost_y = tracked.last_render_pos
+                    off_x, off_y = self._offset
                     self._fading.append(_FadingGhost(
-                        tracked.sprite.current_frame(), ghost_x, ghost_y))
+                        tracked.sprite.current_frame(),
+                        ghost_x + off_x, ghost_y + off_y))
 
         still_fading: List[_FadingGhost] = []
         for ghost in self._fading:

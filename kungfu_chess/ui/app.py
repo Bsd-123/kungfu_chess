@@ -1,4 +1,5 @@
-"""UI composition root (final_plan_verified.md Phase 0 + 1 + 2 + 3 + 4 + 5).
+"""UI composition root (final_plan_verified.md Phase 0 + 1 + 2 + 3 + 4 + 5,
+plus the task-16/17/18 reference-mockup redesign).
 
 Phase 0: wires the existing engine factory + Controller together for
 the live GUI session -- no rendering, no game loop.
@@ -19,6 +20,17 @@ values) -- it translates each one into the UI's own plain-value
 the observers. Every other UI module (`events.py`, `event_bus.py`,
 `moves_log_observer.py`, `score_observer.py`, `panel_renderer.py`)
 only ever sees plain strings/ints.
+
+Redesign (matching the reference mockup): the board no longer sits at
+screen origin -- a Black panel (left) and White panel (right) flank it,
+and a centered "Name: X" / "Score: N" band sits above (Black) and below
+(White) it. All the screen-space geometry for that lives here as one
+set of constants, and gets threaded through every collaborator that
+needs to know where the board now sits on screen: `BoardRenderer`
+(paints the checkerboard at the right offset), `PieceRenderer` /
+`OverlayRenderer` (draw pieces/selection at the right offset), and
+`MouseRouter` (subtracts the offset back out before handing raw screen
+clicks to `Controller`, which stays board-space-only and unmodified).
 """
 from __future__ import annotations
 
@@ -30,11 +42,13 @@ from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.input.controller import Controller
+from kungfu_chess.ui.img import Img
 from kungfu_chess.ui.setup import standard_start_rows
 from kungfu_chess.ui.rendering.board_renderer import BoardRenderer
 from kungfu_chess.ui.rendering.piece_renderer import PieceRenderer
 from kungfu_chess.ui.rendering.overlay_renderer import OverlayRenderer, InputState
 from kungfu_chess.ui.rendering.panel_renderer import PanelRenderer, PanelState
+from kungfu_chess.ui.rendering.toast_renderer import ToastRenderer
 from kungfu_chess.ui.rendering.board_view import BoardView
 from kungfu_chess.ui.rendering.renderer import Renderer
 from kungfu_chess.ui.input.mouse_router import MouseRouter
@@ -49,7 +63,17 @@ BOARD_BACKGROUND_PATH = os.path.join(ASSET_ROOT, "board.png")
 
 BOARD_COLS = 8
 BOARD_ROWS = 8
-PANEL_WIDTH_PX = 260
+
+LEFT_PANEL_WIDTH_PX = 190
+RIGHT_PANEL_WIDTH_PX = 190
+
+# Target overall window height in px. The top/bottom name+score bands
+# split whatever's left over after the board image's own height, so
+# the *total* window height comes out to exactly this value regardless
+# of how tall `board.png` itself turns out to be (see `_Layout`'s own
+# note on measuring the board image rather than assuming a fixed size).
+TARGET_TOTAL_HEIGHT_PX = 900
+MIN_BAND_HEIGHT_PX = 20
 
 
 def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
@@ -90,31 +114,112 @@ def wire_event_observers(engine: GameEngine) -> Tuple[MoveLogObserver, ScoreObse
     return move_log, score
 
 
-def build_board_view(config: GameConfig = None,
-                      clock: Callable[[], float] = time.perf_counter) -> BoardView:
-    """`BoardView` as a thin coordinator over `BoardRenderer` (Phase 1
-    background, Phase 5 widened with a side-panel region),
-    `PieceRenderer` (Phase 1 compositing, Phase 4 interpolation +
-    sprite animation), `OverlayRenderer` (Phase 3 selection highlight +
-    debug markers), and `PanelRenderer` (Phase 5 player names/score/
-    move log). Both `OverlayRenderer.draw` and the panel step no-op
-    whenever their respective state argument is None, so this same
-    board view still works unchanged for an earlier-phase call site
-    that never passes one."""
-    config = config or GameConfig()
-    board_w = config.cell_pixel_size * BOARD_COLS
-    board_h = config.cell_pixel_size * BOARD_ROWS
+class _Layout:
+    """Screen-space geometry for the reference-mockup layout, computed
+    once from `GameConfig`/board dimensions and shared by every
+    collaborator in `build_board_view`/`run_loop` that needs it. Kept as
+    a tiny plain-value holder (not itself a renderer) so it can be
+    passed around and inspected independently of any `Img`/`cv2` state.
 
-    board_renderer = BoardRenderer(BOARD_BACKGROUND_PATH, panel_width_px=PANEL_WIDTH_PX)
-    piece_renderer = PieceRenderer(ASSET_ROOT, config.cell_pixel_size, clock=clock)
-    overlay_renderer = OverlayRenderer(config.cell_pixel_size)
-    panel_renderer = PanelRenderer(board_width_px=board_w, panel_width_px=PANEL_WIDTH_PX,
-                                    board_height_px=board_h)
-    return BoardView(board_renderer, piece_renderer, overlay_renderer, panel_renderer)
+    The checkerboard's own file/rank coordinate-label margin (baked
+    into `board.png` by `generate_placeholder_assets.generate_board`)
+    is measured directly from the saved image here, rather than trusted
+    against a hardcoded constant duplicated between the two modules.
+    Bug this fixes: a stale/older `board.png` on disk (e.g. generated
+    before that margin existed, or with a different margin) used to
+    silently misalign every piece from the grid by however much the
+    hardcoded constant and the actual image disagreed -- pieces would
+    render offset from the square they're logically on, since
+    `piece_offset` was computed from the wrong assumed margin. Reading
+    the real image's width/height and comparing it against the known
+    raw board size (`cell_pixel_size * cols/rows`) is self-correcting:
+    whatever margin the image actually has, on-screen piece placement
+    follows it exactly. The top/bottom band heights are likewise derived
+    (not hardcoded): `TARGET_TOTAL_HEIGHT_PX` minus the measured board
+    image height, split evenly, so the window is exactly
+    `TARGET_TOTAL_HEIGHT_PX` tall no matter what size `board.png` is."""
+
+    def __init__(self, config: GameConfig, board_background_path: str):
+        self.board_w = config.cell_pixel_size * BOARD_COLS
+        self.board_h = config.cell_pixel_size * BOARD_ROWS
+
+        checkerboard = Img().read(board_background_path)
+        board_image_w, board_image_h = checkerboard.width, checkerboard.height
+        margin_x = max(0, (board_image_w - self.board_w) // 2)
+        margin_y = max(0, (board_image_h - self.board_h) // 2)
+
+        leftover = TARGET_TOTAL_HEIGHT_PX - board_image_h
+        top_band_height = max(MIN_BAND_HEIGHT_PX, leftover // 2)
+        bottom_band_height = max(MIN_BAND_HEIGHT_PX, leftover - top_band_height)
+        self.top_band_height = top_band_height
+        self.bottom_band_height = bottom_band_height
+
+        self.board_offset_x = LEFT_PANEL_WIDTH_PX
+        self.board_offset_y = top_band_height
+
+        # Where the checkerboard's own (0, 0) cell actually starts on
+        # screen -- the measured margin further in than the board
+        # *image's* top-left corner.
+        self.piece_offset = (self.board_offset_x + margin_x,
+                              self.board_offset_y + margin_y)
+
+        self.total_width = LEFT_PANEL_WIDTH_PX + board_image_w + RIGHT_PANEL_WIDTH_PX
+        self.total_height = top_band_height + board_image_h + bottom_band_height
+
+        self.right_panel_x0 = self.board_offset_x + board_image_w
+        self.bottom_band_y0 = self.board_offset_y + board_image_h
+        self.board_image_w = board_image_w
+        self.board_image_h = board_image_h
+
+
+def build_board_view(config: GameConfig = None,
+                      clock: Callable[[], float] = time.perf_counter) -> Tuple[BoardView, _Layout]:
+    """`BoardView` as a thin coordinator over `BoardRenderer` (Phase 1
+    background, now widened for the dual side-panel + top/bottom-band
+    layout), `PieceRenderer` (Phase 1 compositing, Phase 4 interpolation
+    + sprite animation, task 16 screen offset), `OverlayRenderer`
+    (Phase 3 selection highlight, task 16 screen offset), `PanelRenderer`
+    (Phase 5 player names/score/move log, task 16 dual-panel + centered
+    name/score band rework), and `ToastRenderer` (bounce-in "Game Over"
+    message, reads `game_over` straight off the snapshot). All four
+    optional collaborators no-op whenever their respective state
+    argument is None (`ToastRenderer` just reads `snapshot.game_over`
+    directly, so it has no separate state argument to gate on).
+
+    Returns `(board_view, layout)` -- callers (`run_loop`, `main`) need
+    `layout` too, to size the renderer window and to build `MouseRouter`
+    with the matching offset/bounds."""
+    config = config or GameConfig()
+    layout = _Layout(config, BOARD_BACKGROUND_PATH)
+
+    board_renderer = BoardRenderer(BOARD_BACKGROUND_PATH,
+                                    board_offset_x=layout.board_offset_x,
+                                    board_offset_y=layout.board_offset_y,
+                                    total_width=layout.total_width,
+                                    total_height=layout.total_height)
+    piece_renderer = PieceRenderer(ASSET_ROOT, config.cell_pixel_size, clock=clock,
+                                    offset=layout.piece_offset)
+    overlay_renderer = OverlayRenderer(config.cell_pixel_size, offset=layout.piece_offset)
+    panel_renderer = PanelRenderer(
+        left_panel_x0=0, left_panel_width=LEFT_PANEL_WIDTH_PX,
+        right_panel_x0=layout.right_panel_x0, right_panel_width=RIGHT_PANEL_WIDTH_PX,
+        panel_height=layout.total_height,
+        board_x0=layout.board_offset_x, board_width=layout.board_image_w,
+        top_band_y0=0, top_band_height=layout.top_band_height,
+        bottom_band_y0=layout.bottom_band_y0, bottom_band_height=layout.bottom_band_height,
+    )
+    toast_renderer = ToastRenderer(
+        center_x=layout.board_offset_x + layout.board_image_w // 2,
+        center_y=layout.board_offset_y + layout.board_image_h // 2,
+        clock=clock,
+    )
+    board_view = BoardView(board_renderer, piece_renderer, overlay_renderer,
+                            panel_renderer, toast_renderer)
+    return board_view, layout
 
 
 def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
-             renderer: Renderer,
+             renderer: Renderer, layout: _Layout,
              move_log: Optional[MoveLogObserver] = None,
              score: Optional[ScoreObserver] = None,
              player_names: Tuple[str, str] = ("White", "Black"),
@@ -132,7 +237,8 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
     for a caller that hasn't wired Phase 5's observers at all -- the
     panel step in `BoardView.render` simply gets `panel_state=None` and
     skips itself."""
-    mouse_router = MouseRouter(controller)
+    mouse_router = MouseRouter(controller, board_offset=layout.piece_offset,
+                                board_size=(layout.board_w, layout.board_h))
     renderer.register_mouse_handler(mouse_router.on_mouse_event)
 
     last = clock()
@@ -151,14 +257,15 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
             )
             panel_state = None
             if move_log is not None or score is not None:
-                recent_texts: List[str] = ([m.text for m in move_log.recent(8)]
-                                            if move_log is not None else [])
+                white_moves = move_log.recent("w", 8) if move_log is not None else []
+                black_moves = move_log.recent("b", 8) if move_log is not None else []
                 panel_state = PanelState(
                     white_name=player_names[0],
                     black_name=player_names[1],
                     white_score=score.score["w"] if score is not None else 0,
                     black_score=score.score["b"] if score is not None else 0,
-                    recent_moves=recent_texts,
+                    white_moves=white_moves,
+                    black_moves=black_moves,
                 )
             frame = board_view.render(engine.snapshot(), input_state, panel_state)
             renderer.draw_frame(frame)
@@ -172,10 +279,11 @@ def main() -> None:  # pragma: no cover
 
     config = GameConfig()
     engine, controller = build_session(config)
-    board_view = build_board_view(config)
+    board_view, layout = build_board_view(config)
     move_log, score = wire_event_observers(engine)
     renderer = Cv2Renderer()
-    run_loop(engine, controller, board_view, renderer, move_log=move_log, score=score)
+    run_loop(engine, controller, board_view, renderer, layout,
+             move_log=move_log, score=score)
 
 
 if __name__ == '__main__':  # pragma: no cover

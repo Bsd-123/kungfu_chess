@@ -188,12 +188,45 @@ class Img:
                     self._full_color(color), thickness)
         return self
 
+    def draw_polygon(self, points: Tuple[Tuple[int, int], ...],
+                      color: Tuple[int, ...], thickness: int = -1) -> "Img":
+        """`points` is a sequence of `(x, y)` vertices. `thickness=-1`
+        fills the polygon (`cv2.fillPoly`); any positive thickness draws
+        just the outline (`cv2.polylines`, closed). Added for chess-
+        piece silhouettes (rook crenellations, knight head, crowns) --
+        shapes `draw_circle`/`draw_rect`/`draw_ellipse` alone can't
+        express, still a thin cv2 wrapper."""
+        pts = np.array([points], dtype=np.int32)
+        if thickness == -1:
+            cv2.fillPoly(self.array, pts, self._full_color(color))
+        else:
+            cv2.polylines(self.array, pts, True, self._full_color(color), thickness)
+        return self
+
+    def draw_line(self, x1: int, y1: int, x2: int, y2: int,
+                   color: Tuple[int, ...], thickness: int = 2) -> "Img":
+        cv2.line(self.array, (x1, y1), (x2, y2),
+                 self._full_color(color), thickness)
+        return self
+
     def put_text(self, text: str, x: int, y: int, color: Tuple[int, ...],
                   font_scale: float = 1.0, thickness: int = 2,
                   font: int = cv2.FONT_HERSHEY_SIMPLEX) -> "Img":
         cv2.putText(self.array, text, (x, y), font, font_scale,
                    self._full_color(color), thickness, cv2.LINE_AA)
         return self
+
+    @staticmethod
+    def text_size(text: str, font_scale: float = 1.0, thickness: int = 2,
+                   font: int = cv2.FONT_HERSHEY_SIMPLEX) -> Tuple[int, int]:
+        """`(width, height)` in pixels that `text` would occupy if drawn
+        with `put_text` using these same params -- lets callers center
+        text (panel headers, side-panel name boxes) without hand-tuned
+        magic-number offsets. Pure query, draws nothing; still a thin
+        wrapper (`cv2.getTextSize`), same philosophy as every other
+        method on this class."""
+        (w, h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+        return w, h
 
     # -- output -----------------------------------------------------------
     def save(self, path: str) -> "Img":

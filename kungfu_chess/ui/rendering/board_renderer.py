@@ -4,11 +4,15 @@ forced to BGRA immediately (plumbing note 3) -- and hands out a fresh
 `.copy()` (plumbing note 5) every frame so nothing downstream ever
 mutates the original.
 
-Phase 5 addition: optionally composites the (unchanged) checkerboard
-onto a wider canvas with a solid sidebar region for `PanelRenderer`.
-`generate_placeholder_assets.py`'s `board.png` stays exactly the plain
-8x8 checkerboard it always was -- the panel-width extension happens
-here, at template-build time, once, not baked into the asset itself."""
+Reworked for the reference-mockup layout (task 16): the checkerboard
+PNG (`generate_placeholder_assets.generate_board`, itself already
+carrying a baked-in file/rank coordinate-label margin) gets pasted onto
+a wider/taller canvas at `(board_offset_x, board_offset_y)`, leaving
+room around it for two side panels (Black/White) and a top/bottom
+name+score band -- all painted by `PanelRenderer` on top of this same
+frame, later in `BoardView.render`. This class only owns the *board*
+image and the flat panel-colored backdrop behind it; it knows nothing
+about panel content."""
 from __future__ import annotations
 
 from kungfu_chess.ui.img import Img
@@ -17,18 +21,23 @@ PANEL_BACKGROUND_COLOR = (40, 40, 40, 255)
 
 
 class BoardRenderer:
-    def __init__(self, background_path: str, panel_width_px: int = 0):
+    def __init__(self, background_path: str,
+                 board_offset_x: int = 0, board_offset_y: int = 0,
+                 total_width: int = None, total_height: int = None):
         checkerboard = Img().read(background_path)
         checkerboard.to_bgra()
 
-        if panel_width_px > 0:
-            total_width = checkerboard.width + panel_width_px
-            template = Img.new(total_width, checkerboard.height, channels=4,
-                                color=PANEL_BACKGROUND_COLOR)
-            template.draw_on(checkerboard, 0, 0)
-            self._template = template
-        else:
+        width = total_width if total_width is not None else checkerboard.width
+        height = total_height if total_height is not None else checkerboard.height
+
+        if width == checkerboard.width and height == checkerboard.height:
+            # No surrounding panel space requested -- keep the template
+            # exactly the plain checkerboard, unchanged from Phase 1.
             self._template = checkerboard
+        else:
+            template = Img.new(width, height, channels=4, color=PANEL_BACKGROUND_COLOR)
+            template.draw_on(checkerboard, board_offset_x, board_offset_y)
+            self._template = template
 
     def fresh_frame(self) -> Img:
         return self._template.copy()

@@ -2,15 +2,28 @@
 plumbing note 1: "From Phase 2 on, drive cv2.imshow + cv2.waitKey(1)
 directly" instead of the blocking one-off `Img.show()` used in Phase 1).
 
-Phase 3 plumbing note 6 (window-resize vs. mouse-coordinate scaling):
-this class has used `cv2.WINDOW_AUTOSIZE` since Phase 2, which is the
-plan's own documented fallback -- the window can't be resized by the
-user at all, so the image and the window are always pixel-for-pixel
-identical and mouse coordinates from `cv2.setMouseCallback` need zero
-translation before reaching `Controller.click`. That resolves Phase 3
-step 2/3 with no separate scaling layer required.
+Phase 3 plumbing note 6 originally used `cv2.WINDOW_AUTOSIZE` specifically
+to dodge window-resize/mouse-coordinate scaling. Reworked to allow
+resizing (`cv2.WINDOW_NORMAL`) -- but *without* any manual coordinate
+rescaling. First attempt at this added a manual rescale via
+`cv2.getWindowImageRect` (native size / displayed size), reasoning that
+`cv2.imshow` stretches the image to fill a resized window so raw mouse
+coordinates would be in window pixels, not image pixels. That reasoning
+was wrong for the actual runtime (Windows, Win32 HighGUI backend):
+`cv2.setMouseCallback` coordinates there are already converted back to
+the original image's pixel space by cv2 itself whenever the window is
+resized -- confirmed by the reported symptom (clicks became "confused"
+after resizing), which is the exact signature of applying that
+conversion a second time on top of coordinates cv2 had already
+converted. So: pass the raw `(x, y)` straight through, same as the
+original `WINDOW_AUTOSIZE` version -- only a defensive clamp against
+the last-drawn frame's own bounds remains, purely to guard against
+stray off-by-one/negative values at the very edge of the window rather
+than to do any real rescaling.
 """
 from __future__ import annotations
+
+from typing import Optional, Tuple
 
 import cv2
 
@@ -24,9 +37,12 @@ class Cv2Renderer(Renderer):
     def __init__(self, window_name: str = "Kung Fu Chess", wait_ms: int = 1):
         self._window_name = window_name
         self._wait_ms = wait_ms
-        cv2.namedWindow(self._window_name, cv2.WINDOW_AUTOSIZE)
+        self._native_w: Optional[int] = None
+        self._native_h: Optional[int] = None
+        cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
 
     def draw_frame(self, frame: Img) -> None:
+        self._native_h, self._native_w = frame.array.shape[:2]
         cv2.imshow(self._window_name, frame.array)
 
     def poll_events(self) -> bool:
@@ -48,11 +64,22 @@ class Cv2Renderer(Renderer):
         """Translates cv2's own event vocabulary (EVENT_LBUTTONDOWN,
         EVENT_MOUSEMOVE, ...) down to the backend-agnostic
         `(x, y, clicked)` shape `MouseRouter` expects, so no other UI
-        collaborator needs to know `cv2`'s event codes exist."""
+        collaborator needs to know `cv2`'s event codes exist. Coordinates
+        are forwarded as-is (see module docstring) -- cv2's own backend
+        already keeps them in the original frame's pixel space even
+        after the window is resized; only clamped to that frame's own
+        bounds as cheap insurance."""
         def _on_cv2_mouse(event, x, y, flags, param) -> None:
+            x, y = self._clamp_to_frame(x, y)
             handler(x, y, event == cv2.EVENT_LBUTTONDOWN)
 
         cv2.setMouseCallback(self._window_name, _on_cv2_mouse)
+
+    def _clamp_to_frame(self, x: int, y: int) -> Tuple[int, int]:
+        if self._native_w is None or self._native_h is None:
+            return x, y
+        return (max(0, min(self._native_w - 1, x)),
+                max(0, min(self._native_h - 1, y)))
 
     def close(self) -> None:
         """Best-effort teardown. On Windows, closing the window via its
