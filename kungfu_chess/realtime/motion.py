@@ -39,14 +39,14 @@ class MoveScheduler:
     def __init__(self):
         self._pending: List[PendingMove] = []
 
-    def checkOverlapping(complete_time:int , clock_ms: int):
-        return complete_time >= clock_ms
+    def _has_expired(self, complete_time:int , clock_ms: int):
+        return complete_time > clock_ms
 
     def schedule(self, pending_move: PendingMove) -> None:
         self._pending.append(pending_move)
 
     def is_piece_busy(self, src: Position, clock_ms: int) -> bool:
-        return any(m.src == src and self.checkOverlapping(m.complete_time, clock_ms) for m in self._pending)
+        return any(m.src == src and self._has_expired(m.complete_time, clock_ms) for m in self._pending)
 
     def is_target_busy(self, dst: Position, clock_ms: int) -> bool:
         """True if some in-flight *move* (jumps don't count -- they
@@ -54,7 +54,7 @@ class MoveScheduler:
         Rule 8 Step 2: two pieces may never simultaneously converge on
         the same destination cell."""
         return any(
-            m.move_type == 'move' and m.dst == dst and m.complete_time >= clock_ms
+            m.move_type == 'move' and m.dst == dst and self._has_expired(m.complete_time, clock_ms)
             for m in self._pending
         )
 
@@ -65,12 +65,12 @@ class MoveScheduler:
         )
 
     def due_moves(self, clock_ms: int) -> List[PendingMove]:
-        due = [m for m in self._pending if m.move_type == 'move' and not self.checkOverlapping(m.complete_time, clock_ms)]
+        due = [m for m in self._pending if m.move_type == 'move' and not self._has_expired(m.complete_time, clock_ms)]
         due.sort(key=lambda m: m.complete_time)
         return due
 
     def clear_expired(self, clock_ms: int) -> None:
-        self._pending = [m for m in self._pending if m.complete_time > clock_ms]
+        self._pending = [m for m in self._pending if self._has_expired(m.complete_time, clock_ms)]
 
     @property
     def pending_moves(self) -> List[PendingMove]:
