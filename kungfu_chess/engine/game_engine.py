@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from kungfu_chess.model.board import BoardInterface
 from kungfu_chess.model.position import Position
@@ -9,7 +9,7 @@ from kungfu_chess.config import GameConfig
 from kungfu_chess.model.game_state import GameState
 from kungfu_chess.rules.rule_engine import RuleEngine
 from kungfu_chess.engine.move_result import MoveResult
-from kungfu_chess.realtime.motion import PendingMove
+from kungfu_chess.realtime.motion import PendingMove, SettlementEvent
 from kungfu_chess.view.game_snapshot import GameSnapshot, PieceSnapshot
 
 
@@ -49,11 +49,16 @@ class GameEngine:
         self._state = state
         self._rule_engine = rule_engine
         self._config = config
+        self._settlement_listeners: List[Callable[[SettlementEvent], None]] = []
 
     # -- read-only facade surface used by commands -----------------
     @property
     def board(self) -> BoardInterface:
         return self._state.board
+
+    @property
+    def clock_ms(self) -> int:
+        return self._state.clock_ms
 
     @property
     def selected(self) -> Optional[Position]:
@@ -139,6 +144,20 @@ class GameEngine:
         self._state.schedule_jump(position, piece, self._config.jump_duration_ms)
         return True
 
+    # -- Phase 5 (final_plan_verified.md section 4A): optional observer
+    # hook. Small, additive, backward-compatible -- an engine with zero
+    # listeners registered behaves exactly as before this was added.
+    def add_settlement_listener(self, listener: Callable[[SettlementEvent], None]) -> None:
+        """Registers `listener` to be called once per SettlementEvent as
+        `settle()` resolves it -- this is how the UI layer (Phase 5's
+        EventBus/observers) learns "a capture just happened" without
+        GameEngine importing anything UI-side, and without exposing the
+        RealTimeArbiter itself. Ordering matches section 1's table:
+        only settled *moves* ever produce a SettlementEvent; jumps never
+        do (they land back on their own src square, so there's nothing
+        to settle)."""
+        self._settlement_listeners.append(listener)
+
     # -- Rule 9/10: virtual-time advancement and atomic settlement ----
     def advance_clock(self, ms: int) -> None:
         self._state.clock_ms += ms
@@ -157,6 +176,8 @@ class GameEngine:
         for event in events:
             if event.captured_piece is not None and event.captured_piece.type == 'K':
                 self._state.game_over = True
+            for listener in self._settlement_listeners:
+                listener(event)
 
     def render(self) -> str:
         return BoardTextView.render_board(self._state.board)

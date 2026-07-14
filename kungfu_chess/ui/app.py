@@ -1,4 +1,4 @@
-"""UI composition root (final_plan_verified.md Phase 0 + 1 + 2 + 3 + 4).
+"""UI composition root (final_plan_verified.md Phase 0 + 1 + 2 + 3 + 4 + 5).
 
 Phase 0: wires the existing engine factory + Controller together for
 the live GUI session -- no rendering, no game loop.
@@ -9,17 +9,22 @@ Phase 2: adds `run_loop`, a real-time loop that measures actual wall-
 clock elapsed time each tick and drives `engine.advance_clock` with it.
 Phase 3: wires mouse input through -- click a piece, click a
 destination, watch it settle.
-Phase 4: pieces now glide/hop/breathe instead of popping into place.
-`PieceRenderer` takes its own `clock` (defaults to wall-clock, same as
-`run_loop`'s) purely to drive sprite animation timing -- independent of
-`engine.advance_clock`'s simulation timing, so a headless test can
-inject a fake clock into either or both without needing a display.
+Phase 4: pieces glide/hop/breathe instead of popping into place.
+Phase 5: live side panel (player names/score/recent moves), driven by
+the Observer hook from plan section 4A. `wire_event_observers` below is
+the ONE place in the whole `ui/` package allowed to import an
+engine-internal type (`SettlementEvent`, which carries live `Piece`
+values) -- it translates each one into the UI's own plain-value
+`MoveResolvedEvent` immediately, before anything reaches `EventBus` or
+the observers. Every other UI module (`events.py`, `event_bus.py`,
+`moves_log_observer.py`, `score_observer.py`, `panel_renderer.py`)
+only ever sees plain strings/ints.
 """
 from __future__ import annotations
 
 import os
 import time
-from typing import Callable, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
@@ -29,13 +34,22 @@ from kungfu_chess.ui.setup import standard_start_rows
 from kungfu_chess.ui.rendering.board_renderer import BoardRenderer
 from kungfu_chess.ui.rendering.piece_renderer import PieceRenderer
 from kungfu_chess.ui.rendering.overlay_renderer import OverlayRenderer, InputState
+from kungfu_chess.ui.rendering.panel_renderer import PanelRenderer, PanelState
 from kungfu_chess.ui.rendering.board_view import BoardView
 from kungfu_chess.ui.rendering.renderer import Renderer
 from kungfu_chess.ui.input.mouse_router import MouseRouter
+from kungfu_chess.ui.events.event_bus import EventBus
+from kungfu_chess.ui.events.events import MoveResolvedEvent
+from kungfu_chess.ui.events.observers.moves_log_observer import MoveLogObserver
+from kungfu_chess.ui.events.observers.score_observer import ScoreObserver
 
 ASSET_ROOT = os.path.join(os.path.dirname(__file__), "sprites", "assets",
                            "placeholder")
 BOARD_BACKGROUND_PATH = os.path.join(ASSET_ROOT, "board.png")
+
+BOARD_COLS = 8
+BOARD_ROWS = 8
+PANEL_WIDTH_PX = 260
 
 
 def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
@@ -49,35 +63,75 @@ def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
     return engine, controller
 
 
+def wire_event_observers(engine: GameEngine) -> Tuple[MoveLogObserver, ScoreObserver]:
+    """Plan section 4A: bridges GameEngine's settlement-listener hook
+    into the UI's own event vocabulary. See module docstring -- this
+    function is the sole place a `SettlementEvent` (engine-internal,
+    carries live `Piece` values) is ever touched by UI code; everything
+    it hands off downstream (`MoveResolvedEvent`) is a plain-value DTO."""
+    from kungfu_chess.realtime.motion import SettlementEvent  # composition-root-only bridge import
+
+    event_bus = EventBus()
+    move_log = MoveLogObserver(clock_ms_source=lambda: engine.clock_ms)
+    score = ScoreObserver()
+    event_bus.subscribe_move_resolved(move_log.on_move_resolved)
+    event_bus.subscribe_move_resolved(score.on_move_resolved)
+
+    def on_settlement(event: SettlementEvent) -> None:
+        event_bus.publish_move_resolved(MoveResolvedEvent(
+            piece_color=event.piece.color,
+            piece_kind=event.piece.kind,
+            src_row=event.src[0], src_col=event.src[1],
+            dst_row=event.dst[0], dst_col=event.dst[1],
+            captured_piece_kind=event.captured_piece.kind if event.captured_piece else None,
+        ))
+
+    engine.add_settlement_listener(on_settlement)
+    return move_log, score
+
+
 def build_board_view(config: GameConfig = None,
                       clock: Callable[[], float] = time.perf_counter) -> BoardView:
     """`BoardView` as a thin coordinator over `BoardRenderer` (Phase 1
-    background), `PieceRenderer` (Phase 1 compositing, Phase 4
-    interpolation + sprite animation), and `OverlayRenderer` (Phase 3
-    selection highlight + debug markers). `OverlayRenderer.draw` no-ops
-    whenever `input_state` is None, so this same board view still works
-    unchanged for a Phase 1/2-style call site that never passes one."""
+    background, Phase 5 widened with a side-panel region),
+    `PieceRenderer` (Phase 1 compositing, Phase 4 interpolation +
+    sprite animation), `OverlayRenderer` (Phase 3 selection highlight +
+    debug markers), and `PanelRenderer` (Phase 5 player names/score/
+    move log). Both `OverlayRenderer.draw` and the panel step no-op
+    whenever their respective state argument is None, so this same
+    board view still works unchanged for an earlier-phase call site
+    that never passes one."""
     config = config or GameConfig()
-    board_renderer = BoardRenderer(BOARD_BACKGROUND_PATH)
+    board_w = config.cell_pixel_size * BOARD_COLS
+    board_h = config.cell_pixel_size * BOARD_ROWS
+
+    board_renderer = BoardRenderer(BOARD_BACKGROUND_PATH, panel_width_px=PANEL_WIDTH_PX)
     piece_renderer = PieceRenderer(ASSET_ROOT, config.cell_pixel_size, clock=clock)
     overlay_renderer = OverlayRenderer(config.cell_pixel_size)
-    return BoardView(board_renderer, piece_renderer, overlay_renderer)
+    panel_renderer = PanelRenderer(board_width_px=board_w, panel_width_px=PANEL_WIDTH_PX,
+                                    board_height_px=board_h)
+    return BoardView(board_renderer, piece_renderer, overlay_renderer, panel_renderer)
 
 
 def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
-             renderer: Renderer, clock: Callable[[], float] = time.perf_counter) -> None:
-    """Phase 2's real-time loop, extended in Phase 3 with mouse input.
-    Each tick: measure actual elapsed wall-clock time -> advance the
-    engine's clock by it (settling any due motions) -> build this
-    tick's `InputState` from `controller.selected` (the only live
-    selection source, plan section 0.4 -- never `snapshot.selected`)
-    and the `MouseRouter`'s last-known cursor/click position -> render
-    -> display -> poll for quit/close.
+             renderer: Renderer,
+             move_log: Optional[MoveLogObserver] = None,
+             score: Optional[ScoreObserver] = None,
+             player_names: Tuple[str, str] = ("White", "Black"),
+             clock: Callable[[], float] = time.perf_counter) -> None:
+    """Phase 2's real-time loop, extended in Phase 3 with mouse input
+    and in Phase 5 with a live side panel. Each tick: measure actual
+    elapsed wall-clock time -> advance the engine's clock by it
+    (settling any due motions, which fires any registered settlement
+    listeners synchronously) -> build this tick's `InputState` (from
+    `controller.selected`, plan section 0.4) and `PanelState` (from
+    `move_log`/`score`, if provided) -> render -> display -> poll for
+    quit/close.
 
-    The mouse handler is registered once, before the loop starts, via
-    `Renderer.register_mouse_handler` -- a headless test double simply
-    leaves that a no-op and can drive `MouseRouter.on_mouse_event`
-    directly instead."""
+    `move_log`/`score` are optional so this loop still works unchanged
+    for a caller that hasn't wired Phase 5's observers at all -- the
+    panel step in `BoardView.render` simply gets `panel_state=None` and
+    skips itself."""
     mouse_router = MouseRouter(controller)
     renderer.register_mouse_handler(mouse_router.on_mouse_event)
 
@@ -95,7 +149,18 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
                 cursor_pos=mouse_router.cursor_pos,
                 last_click_pos=mouse_router.last_click_pos,
             )
-            frame = board_view.render(engine.snapshot(), input_state)
+            panel_state = None
+            if move_log is not None or score is not None:
+                recent_texts: List[str] = ([m.text for m in move_log.recent(8)]
+                                            if move_log is not None else [])
+                panel_state = PanelState(
+                    white_name=player_names[0],
+                    black_name=player_names[1],
+                    white_score=score.score["w"] if score is not None else 0,
+                    black_score=score.score["b"] if score is not None else 0,
+                    recent_moves=recent_texts,
+                )
+            frame = board_view.render(engine.snapshot(), input_state, panel_state)
             renderer.draw_frame(frame)
             running = renderer.poll_events()
     finally:
@@ -108,8 +173,9 @@ def main() -> None:  # pragma: no cover
     config = GameConfig()
     engine, controller = build_session(config)
     board_view = build_board_view(config)
+    move_log, score = wire_event_observers(engine)
     renderer = Cv2Renderer()
-    run_loop(engine, controller, board_view, renderer)
+    run_loop(engine, controller, board_view, renderer, move_log=move_log, score=score)
 
 
 if __name__ == '__main__':  # pragma: no cover
