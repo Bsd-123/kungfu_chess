@@ -26,7 +26,7 @@ class RealTimeArbiter:
 
       - scheduling new motions (moves and jumps) with a duration that is
         computed by the caller (GameEngine owns "how long does this
-        particular move take" -- see Spec §10's N x 1000ms rule; the
+        particular move take" -- see Spec section 10's N x 1000ms rule; the
         Arbiter just faithfully counts down whatever duration it's given)
       - answering busy / target-busy / airborne queries, used up front
         to reject conflicting requests before they're ever scheduled
@@ -63,6 +63,7 @@ class RealTimeArbiter:
             move_type='move',
             complete_time=clock_ms + duration_ms,
             src=src, dst=dst, piece=piece,
+            start_time=clock_ms,
         ))
 
     def schedule_jump(self, src: Position, piece: Piece,
@@ -71,6 +72,7 @@ class RealTimeArbiter:
             move_type='jump',
             complete_time=clock_ms + duration_ms,
             src=src, piece=piece,
+            start_time=clock_ms,
         ))
 
     @property

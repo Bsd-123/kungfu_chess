@@ -10,12 +10,21 @@ from kungfu_chess.model.piece import Piece
 class PendingMove:
     """Value object representing a queued move or jump. Encapsulates the
     field names so no other class needs to know about dict keys, and
-    holds the moving Piece as a value object rather than a raw token."""
+    holds the moving Piece as a value object rather than a raw token.
+
+    `start_time` (Phase 4, final_plan_verified.md section 7.5): the
+    clock_ms reading at scheduling time. Without it, `0.0 -> 1.0`
+    animation progress can't be derived -- only `complete_time` (when a
+    motion finishes) was stored before, which only tells you how much
+    time is left, not what fraction of the total duration has elapsed.
+    Defaults to 0 so this stays backward-compatible with any existing
+    caller that constructs a PendingMove positionally without it."""
     move_type: str  # 'move' or 'jump'
     complete_time: int
     src: Position
     piece: Piece
     dst: Optional[Position] = None
+    start_time: int = 0
 
 
 @dataclass
