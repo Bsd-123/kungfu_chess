@@ -45,31 +45,41 @@ class KingMovementRule(BaseMovementRule):
         return max(abs(dr), abs(dc)) == 1
 
 
+# NOTE on real-time collision handling: sliding pieces (Rook/Bishop/
+# Queen) used to gate legality on `board.path_clear(src, dst)` -- "is
+# every square between here and there empty *right now*". In Kung Fu
+# Chess that question no longer has a single meaningful answer at
+# request time: the board several hundred ms from now (when the piece
+# actually reaches those squares) is not the board right now, and a
+# piece already travelling toward one of those squares may vacate or
+# occupy it before this move gets there. So these rules now validate
+# shape only; whether the path is actually clear when the piece gets
+# there is resolved dynamically, square by square, by
+# RealTimeArbiter._advance_through_path at settlement time (a same-
+# color occupant truncates the move there, a different-color occupant
+# is captured there). `board.path_clear` is kept on BoardInterface for
+# any caller that still wants a static "is it clear right now" read.
+
+
 class RookMovementRule(BaseMovementRule):
     def _is_shape_legal(self, board, piece, src, dst):
         dr = dst[0] - src[0]
         dc = dst[1] - src[1]
-        if dr != 0 and dc != 0:
-            return False
-        return board.path_clear(src, dst)
+        return dr == 0 or dc == 0
 
 
 class BishopMovementRule(BaseMovementRule):
     def _is_shape_legal(self, board, piece, src, dst):
         dr = dst[0] - src[0]
         dc = dst[1] - src[1]
-        if abs(dr) != abs(dc):
-            return False
-        return board.path_clear(src, dst)
+        return abs(dr) == abs(dc)
 
 
 class QueenMovementRule(BaseMovementRule):
     def _is_shape_legal(self, board, piece, src, dst):
         dr = dst[0] - src[0]
         dc = dst[1] - src[1]
-        if dr != 0 and dc != 0 and abs(dr) != abs(dc):
-            return False
-        return board.path_clear(src, dst)
+        return dr == 0 or dc == 0 or abs(dr) == abs(dc)
 
 
 class KnightMovementRule(BaseMovementRule):
@@ -106,8 +116,12 @@ class PawnMovementRule(BaseMovementRule):
             if dr == direction:
                 return dest_piece is None
             if dr == 2 * direction and src[0] == start_row:
-                mid = (src[0] + direction, src[1])
-                return board.is_empty_at(mid) and dest_piece is None
+                # Mid-square occupancy is no longer checked here for the
+                # same reason sliding pieces dropped their path_clear
+                # gate above: it's resolved dynamically at settlement
+                # time via RealTimeArbiter._advance_through_path, not
+                # upfront against the current board.
+                return dest_piece is None
             return False
 
         if abs(dc) == 1 and dr == direction:

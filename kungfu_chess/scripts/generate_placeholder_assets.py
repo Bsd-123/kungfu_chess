@@ -1,22 +1,28 @@
 """Placeholder art (final_plan_verified.md Phase 1 step 4, extended in
 Phase 4 for the sprite/state-machine layer, and refreshed to match a
-reference mockup with real chess-piece silhouettes + coordinate labels
-around the board). Built purely through `Img.new`/`draw_rect`/
-`draw_circle`/`draw_ellipse`/`draw_polygon`/`draw_line`/`put_text`/
-`save` -- no external art, no other drawing library, no PIL/Unicode
-font glyphs (cv2's Hershey fonts don't have chess symbols, so the
-pieces are hand-built silhouettes instead of rendered characters).
+reference mockup with real chess-piece silhouettes). Built purely
+through `Img.new`/`draw_rect`/`draw_circle`/`draw_ellipse`/
+`draw_polygon`/`draw_line`/`put_text`/`save` -- no external art, no
+other drawing library, no PIL/Unicode font glyphs (cv2's Hershey fonts
+don't have chess symbols, so the pieces are hand-built silhouettes
+instead of rendered characters).
 
 Each state folder gets `frame_0.png`, `frame_1.png`, ... plus a
 `config.json` (`fps`, `loop`, `next_state_when_finished`) that
-`SpriteLibrary` reads. Swapping to real assets later is a one-line path
-change in `PieceRenderer`'s asset root (this script only ever writes
-under `.../sprites/assets/placeholder/`, never touches `.../official/`).
+`SpriteLibrary` reads. `board.png` is a *plain* checkerboard with no
+margin or coordinate labels baked in -- `BoardRenderer` draws those
+itself, uniformly, around whatever checkerboard image it's given
+(matters now that a real board asset can be dropped in too: it will
+never happen to be exactly `cell_pixel_size` px/square or carry this
+app's own label styling, so baking the margin into this generator's own
+output specifically would only work for this generator's own output).
 
-`board.png` now includes its own coordinate-label margin (files a-h,
-ranks 8-1) baked in, matching the reference layout -- the checkerboard
-squares themselves start at `(COORD_MARGIN, COORD_MARGIN)` within the
-saved image, not `(0, 0)`.
+Swapping to real assets is a drop-a-folder-in operation, not a code
+change: `SpriteLibrary` auto-detects a `pieces_mine/` subfolder under
+its asset root and switches to that layout instead of this script's
+flat one (see `kungfu_chess/ui/sprites/sprite_library.py`). This script
+only ever writes under `.../sprites/assets/placeholder/`, never touches
+`.../assets/assets/` (the real-asset folder).
 
 Run directly: `python -m kungfu_chess.scripts.generate_placeholder_assets`
 """
@@ -33,9 +39,6 @@ ASSET_ROOT = os.path.join(os.path.dirname(__file__), "..", "ui", "sprites",
 
 LIGHT_SQUARE = (181, 217, 240)   # BGR
 DARK_SQUARE = (99, 136, 181)     # BGR
-COORD_MARGIN_BG = (60, 60, 60)   # BGR, margin strip around the checkerboard
-COORD_TEXT_COLOR = (230, 230, 230)
-COORD_MARGIN = 28
 
 WHITE_FILL = (240, 240, 240)     # BGR, near-white
 WHITE_OUTLINE = (25, 25, 25)
@@ -46,23 +49,22 @@ MOVE_HIGHLIGHT = (60, 220, 255)  # BGR, bright amber ring while in motion
 
 KINDS = ["K", "Q", "R", "B", "N", "P"]
 COLORS = ["w", "b"]
-FILE_LETTERS = "abcdefgh"
 
 STATE_CONFIGS = {
     "idle": {"fps": 2, "loop": True, "next_state_when_finished": None},
     "move": {"fps": 6, "loop": True, "next_state_when_finished": None},
     "jump": {"fps": 6, "loop": True, "next_state_when_finished": None},
+    "short_rest": {"fps": 4, "loop": False, "next_state_when_finished": "long_rest"},
     "long_rest": {"fps": 2, "loop": False, "next_state_when_finished": "idle"},
 }
 
 
 def generate_board(cell_pixel_size: int, ncols: int, nrows: int) -> str:
+    """Plain `ncols x nrows` checkerboard, no margin/labels -- see the
+    module docstring for why that's `BoardRenderer`'s job now, not
+    this generator's."""
     board_w = cell_pixel_size * ncols
     board_h = cell_pixel_size * nrows
-    total_w = board_w + 2 * COORD_MARGIN
-    total_h = board_h + 2 * COORD_MARGIN
-
-    canvas = Img.new(total_w, total_h, channels=4, color=(*COORD_MARGIN_BG, 255))
 
     checkerboard = Img.new(board_w, board_h, channels=4, color=(0, 0, 0, 255))
     for row in range(nrows):
@@ -72,26 +74,9 @@ def generate_board(cell_pixel_size: int, ncols: int, nrows: int) -> str:
             x1, y1 = col * cell_pixel_size, row * cell_pixel_size
             x2, y2 = x1 + cell_pixel_size, y1 + cell_pixel_size
             checkerboard.draw_rect(x1, y1, x2 - 1, y2 - 1, color, thickness=-1)
-    canvas.draw_on(checkerboard, COORD_MARGIN, COORD_MARGIN)
-
-    font_scale = 0.5
-    for col in range(ncols):
-        label = FILE_LETTERS[col]
-        x = COORD_MARGIN + col * cell_pixel_size + cell_pixel_size // 2 - 6
-        canvas.put_text(label, x, COORD_MARGIN - 9, COORD_TEXT_COLOR,
-                         font_scale=font_scale, thickness=1)
-        canvas.put_text(label, x, total_h - 9, COORD_TEXT_COLOR,
-                         font_scale=font_scale, thickness=1)
-    for row in range(nrows):
-        label = str(nrows - row)
-        y = COORD_MARGIN + row * cell_pixel_size + cell_pixel_size // 2 + 6
-        canvas.put_text(label, 10, y, COORD_TEXT_COLOR,
-                         font_scale=font_scale, thickness=1)
-        canvas.put_text(label, total_w - 20, y, COORD_TEXT_COLOR,
-                         font_scale=font_scale, thickness=1)
 
     path = os.path.join(ASSET_ROOT, "board.png")
-    canvas.save(path)
+    checkerboard.save(path)
     return path
 
 
@@ -262,6 +247,13 @@ def jump_frames(color: str, kind: str, cell: int):
             _piece_sprite(kind, color, cell, 0.85, 1.2)]
 
 
+def short_rest_frames(color: str, kind: str, cell: int):
+    # Brief post-jump settle before the longer long_rest cooldown --
+    # a lighter dim than long_rest so the two are visually distinct.
+    return [_piece_sprite(kind, color, cell, 1.0, 1.0, alpha=230),
+            _piece_sprite(kind, color, cell, 1.0, 1.0, alpha=210)]
+
+
 def long_rest_frames(color: str, kind: str, cell: int):
     return [_piece_sprite(kind, color, cell, 1.0, 1.0, alpha=200),
             _piece_sprite(kind, color, cell, 1.0, 1.0, alpha=140)]
@@ -271,6 +263,7 @@ STATE_BUILDERS = {
     "idle": idle_frames,
     "move": move_frames,
     "jump": jump_frames,
+    "short_rest": short_rest_frames,
     "long_rest": long_rest_frames,
 }
 

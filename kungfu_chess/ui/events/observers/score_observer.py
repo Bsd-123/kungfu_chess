@@ -20,9 +20,9 @@ class ScoreObserver:
         self._apply_capture(event.captured_piece_kind, event.piece_color)
 
     def on_jump_resolved(self, event: JumpResolvedEvent) -> None:
-        # Kept for API symmetry with the plan's own blueprint; never
-        # actually invoked under the current engine, since jumps never
-        # produce a SettlementEvent to begin with (plan section 1).
+        # Now live: a jump landing on an enemy piece (requirement 3)
+        # publishes a JumpResolvedEvent via ui/app.py's on_settlement
+        # bridge, same as a move capture does.
         self._apply_capture(event.captured_piece_kind, event.piece_color)
 
     def _apply_capture(self, captured_kind: Optional[str], capturing_color: str) -> None:

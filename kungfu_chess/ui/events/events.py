@@ -15,6 +15,17 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class MoveResolvedEvent:
+    """`dst_row`/`dst_col` is always where the piece actually ended up.
+    `requested_dst_row`/`requested_dst_col` (new: animation snap-back
+    feature) carry what was originally asked for -- `None` when the two
+    already agree (or for any producer that hasn't been updated to know
+    the difference, keeping this additive/backward-compatible). A
+    listener that only cares about "where did it end up" can keep
+    ignoring these two fields entirely; `PieceRenderer` is the one
+    consumer that uses them, to distinguish a truncated/redirected
+    landing (needs a quick corrective slide) from an ordinary one (no
+    correction needed) or a genuine mid-flight capture (already handled
+    by its existing fade-out)."""
     piece_color: str
     piece_kind: str
     src_row: int
@@ -22,15 +33,19 @@ class MoveResolvedEvent:
     dst_row: int
     dst_col: int
     captured_piece_kind: Optional[str]
+    requested_dst_row: Optional[int] = None
+    requested_dst_col: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class JumpResolvedEvent:
-    """Declared for API symmetry with the plan's section 7.6 blueprint.
-    Never actually published under the current engine: jumps never
-    produce a SettlementEvent at all (plan section 1 -- "a jump lands
-    back on its own src square, so there's nothing to settle"), so
-    there is currently no source event to build one from."""
+    """Published when a hover/jump lands (real-time collision/sync
+    integration: requirement 3). Originally declared for API symmetry
+    with the plan's section 7.6 blueprint and never published, because
+    jumps didn't produce a SettlementEvent at all under the pre-
+    integration engine. They do now -- see
+    `kungfu_chess.realtime.motion.SettlementEvent.move_type` and
+    `RealTimeArbiter._resolve_jump_landing` -- so this is live."""
     piece_color: str
     piece_kind: str
     row: int

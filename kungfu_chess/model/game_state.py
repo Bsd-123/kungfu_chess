@@ -48,7 +48,16 @@ class GameState:
         return self.arbiter.is_active_airborne_at(cell, self.clock_ms)
 
     def schedule_move(self, src: Position, dst: Position, piece: Piece, duration_ms: int) -> None:
-        self.arbiter.schedule_move(src, dst, piece, self.clock_ms, duration_ms)
+        self.arbiter.schedule_move(src, dst, piece, self.clock_ms, duration_ms, self.board)
 
     def schedule_jump(self, src: Position, piece: Piece, duration_ms: int) -> None:
+        # Deliberately does NOT clear the board cell: the piece must
+        # stay visible/renderable at its square for the whole hover (the
+        # snapshot layer only ever draws what board.get_piece_at
+        # returns). "Vacant for collision purposes while airborne"
+        # (requirement 3) is instead a property the Arbiter's path-walk
+        # asks for explicitly via `is_active_airborne_at`, layered on
+        # top of the literal board content -- see
+        # RealTimeArbiter._advance_through_path -- rather than something
+        # achieved by actually removing the piece from the board.
         self.arbiter.schedule_jump(src, piece, self.clock_ms, duration_ms)

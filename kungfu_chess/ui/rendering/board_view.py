@@ -32,6 +32,18 @@ class BoardView:
         self._panel = panel_renderer
         self._toast = toast_renderer
 
+    @property
+    def piece_renderer(self) -> PieceRenderer:
+        """Read-only handle to the piece-compositing collaborator --
+        `BoardView` stays a thin coordinator (no new drawing logic here),
+        but the composition root (`ui/app.py`) needs a way to wire
+        `PieceRenderer` into the settlement-event pipeline (animation
+        snap-back feature) without reaching past `BoardView` into some
+        other construction path. Same rationale as returning
+        `move_log`/`score` from `wire_event_observers`: the composition
+        root needs handles to wire collaborators together."""
+        return self._pieces
+
     def render(self, snapshot: GameSnapshot, input_state=None, panel_state=None) -> Img:
         frame = self._board.fresh_frame()
         self._pieces.draw(frame, snapshot)

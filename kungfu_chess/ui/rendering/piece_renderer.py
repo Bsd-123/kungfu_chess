@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from kungfu_chess.model.position import Position
+from kungfu_chess.ui.events.events import MoveResolvedEvent
 from kungfu_chess.ui.img import Img
 from kungfu_chess.ui.sprites.animated_sprite import AnimatedSprite
 from kungfu_chess.ui.sprites.sprite_library import SpriteLibrary
@@ -31,6 +32,12 @@ from kungfu_chess.view.game_snapshot import GameSnapshot, PieceSnapshot
 
 JUMP_HOP_HEIGHT_PX = 18
 FADE_DURATION_MS = 220.0
+
+# Animation snap-back feature (design decision #2): how long the
+# corrective slide takes when a sliding move settles somewhere other
+# than where it was requested to go. Short on purpose -- "fast slide",
+# not a leisurely rebound -- but never an instant pop.
+CORRECTION_DURATION_MS = 180.0
 
 
 @dataclass
@@ -49,6 +56,40 @@ class _FadingGhost:
     x: int
     y: int
     elapsed_ms: float = 0.0
+
+
+@dataclass
+class _Correction:
+    """A brief corrective slide, played instead of an instant snap when
+    a settled move's true landing square differs from the one it had
+    been animating toward the whole flight (design decision #2: a
+    same-color near-miss truncation, or a mid-path capture that stopped
+    the mover early -- requirements 1/2 -- both redirect a move away
+    from its originally-requested destination).
+
+    `to_x`/`to_y` is always the piece's true settled pixel position
+    (where `draw()` would render it anyway, once the correction
+    finishes). `from_x`/`from_y` is wherever the piece was actually
+    last rendered -- mid-interpolation toward the *wrong* target -- the
+    instant the settlement was reported, so the slide always starts
+    exactly where the eye last saw the piece, with no visible pop at
+    the start of the correction either."""
+    from_x: int
+    from_y: int
+    to_x: int
+    to_y: int
+    elapsed_ms: float = 0.0
+
+    def finished(self) -> bool:
+        return self.elapsed_ms >= CORRECTION_DURATION_MS
+
+    def position(self) -> Tuple[int, int]:
+        t = min(1.0, max(0.0, self.elapsed_ms / CORRECTION_DURATION_MS))
+        # Ease-out cubic: fast at first, smoothly decelerating into the
+        # landing square -- "smooth deceleration/fast slide", not a
+        # linear glide and not a bounce/rebound.
+        eased_t = 1.0 - (1.0 - t) ** 3
+        return _lerp(self.from_x, self.to_x, eased_t), _lerp(self.from_y, self.to_y, eased_t)
 
 
 def _lerp(a: int, b: int, t: float) -> int:
@@ -75,6 +116,18 @@ class PieceRenderer:
         self._last_tick: Optional[float] = None
         self._tracked: Dict[Position, _Tracked] = {}
         self._fading: List[_FadingGhost] = []
+
+        # Animation snap-back feature (design decision #2): corrections
+        # currently playing, keyed by the cell the piece actually
+        # settled on. `_redirected_from` is a short-lived side channel
+        # (populated in `on_move_resolved`, consumed once by the very
+        # next `draw()` call's vanished-key pass) recording "this source
+        # cell's piece was authoritatively redirected, not captured" --
+        # needed because the existing swallowed-piece fade-out heuristic
+        # below would otherwise misread a truncated landing as a capture
+        # (it never sees the true destination, only the *requested* one).
+        self._correcting: Dict[Position, _Correction] = {}
+        self._redirected_from: Dict[Position, Position] = {}
 
     def _dt_ms(self) -> float:
         now = self._clock()
@@ -105,9 +158,58 @@ class PieceRenderer:
             return piece.pixel_x, max(0, piece.pixel_y - bump)
         return piece.pixel_x, piece.pixel_y
 
+    # -- animation snap-back feature (design decision #2) -----------------
+    def on_move_resolved(self, event: MoveResolvedEvent) -> None:
+        """Settlement-event hook, subscribed via `EventBus` in
+        `ui/app.py`'s `wire_event_observers` (the same pattern
+        `MoveLogObserver`/`ScoreObserver` already use). Fires
+        synchronously inside `engine.advance_clock`, which always
+        happens *before* this tick's own `draw()` call -- so
+        `self._tracked`'s `last_render_pos` for the move's source cell
+        still reflects the previous frame's interpolated position,
+        exactly the right starting point for a corrective slide.
+
+        A no-op whenever the move landed exactly where it was requested
+        (nothing to correct) or this is a jump (jumps aren't routed
+        through `MoveResolvedEvent` at all -- see `ui/app.py`)."""
+        if event.requested_dst_row is None or event.requested_dst_col is None:
+            return
+        if (event.requested_dst_row, event.requested_dst_col) == (event.dst_row, event.dst_col):
+            return  # landed exactly where requested -- an ordinary settle
+
+        src_cell = Position(event.src_row, event.src_col)
+        dst_cell = Position(event.dst_row, event.dst_col)
+
+        tracked = self._tracked.get(src_cell)
+        if tracked is not None:
+            from_x, from_y = tracked.last_render_pos
+        else:
+            # No frame was ever rendered for this motion (e.g. it
+            # settled on the very first tick) -- fall back to the
+            # requested destination's pixel position, the best guess
+            # for "where it looked like it was headed".
+            from_x = event.requested_dst_col * self._cell
+            from_y = event.requested_dst_row * self._cell
+
+        to_x, to_y = event.dst_col * self._cell, event.dst_row * self._cell
+        self._correcting[dst_cell] = _Correction(from_x, from_y, to_x, to_y)
+        # Tell the vanished-key pass below "this exact source cell's
+        # disappearance is accounted for -- it redirected, it wasn't
+        # captured" so it doesn't also spawn a fade-out ghost for it.
+        self._redirected_from[src_cell] = dst_cell
+
     def draw(self, frame: Img, snapshot: GameSnapshot) -> None:
         dt_ms = self._dt_ms()
         seen: Dict[Position, PieceSnapshot] = {}
+
+        # Advance every in-progress corrective slide (design decision
+        # #2) once per frame, same dt as everything else, and retire any
+        # that have finished -- from then on the piece just renders at
+        # its true position like any other idle piece.
+        for correction in self._correcting.values():
+            correction.elapsed_ms += dt_ms
+        self._correcting = {cell: c for cell, c in self._correcting.items()
+                             if not c.finished()}
 
         for piece in snapshot.pieces:
             cell = self._cell_of(piece)
@@ -127,7 +229,19 @@ class PieceRenderer:
                 else None
             )
 
-            render_x, render_y = self._interpolated_position(piece)
+            correction = self._correcting.get(cell)
+            if correction is not None and piece.state == "idle":
+                # Mid corrective slide -- override the ordinary idle
+                # position with the eased in-progress one.
+                render_x, render_y = correction.position()
+            else:
+                if correction is not None:
+                    # A brand new motion already started from this cell
+                    # before the correction finished playing -- that
+                    # motion's own interpolation takes priority.
+                    del self._correcting[cell]
+                render_x, render_y = self._interpolated_position(piece)
+
             tracked.last_render_pos = (render_x, render_y)
             off_x, off_y = self._offset
             frame.draw_on(tracked.sprite.current_frame(),
@@ -135,20 +249,26 @@ class PieceRenderer:
 
         # A key tracked last frame but missing now either settled
         # normally (its key just moved to the destination cell, handled
-        # as a fresh entry there above) or was swallowed mid-flight
-        # (plan section 1: an arriving move is captured by an airborne
-        # jumper at its destination) -- detect the latter and fade it
-        # out instead of letting it vanish with zero visual feedback.
-        # Heuristic: if no piece of the *same color+kind* shows up at
-        # the recorded destination this frame, treat it as swallowed.
-        # Known limitation: a promoting pawn's kind changes on arrival
-        # (P -> Q), so this heuristic can't fully distinguish "promoted"
-        # from "swallowed" -- Phase 5's SettlementEvent/Observer hook
-        # (which reports exactly what happened) is the precise fix;
-        # this stays a reasonable approximation until then.
+        # as a fresh entry there above), was authoritatively redirected
+        # (design decision #2 -- `on_move_resolved` already recorded it
+        # in `_redirected_from` and queued its correction above, so
+        # there's nothing further to do here), or was genuinely
+        # swallowed mid-flight (plan section 1: an arriving move is
+        # captured by an airborne jumper at its destination) -- only the
+        # last of those three should ever produce a fade-out ghost.
+        # Heuristic fallback for anything *not* covered by
+        # `_redirected_from`: if no piece of the same color+kind shows
+        # up at the recorded (requested) destination this frame, treat
+        # it as swallowed. Known limitation: a promoting pawn's kind
+        # changes on arrival (P -> Q), so this heuristic can't fully
+        # distinguish "promoted" from "swallowed" for that one case;
+        # this stays a reasonable approximation.
         vanished_keys = set(self._tracked) - set(seen)
         for key in vanished_keys:
             tracked = self._tracked.pop(key)
+            if key in self._redirected_from:
+                del self._redirected_from[key]
+                continue  # accounted for already -- redirected, not captured
             if tracked.last_state == "move" and tracked.last_dst is not None:
                 dst_x, dst_y = tracked.last_dst
                 settled_normally = any(

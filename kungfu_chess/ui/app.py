@@ -42,9 +42,8 @@ from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.input.controller import Controller
-from kungfu_chess.ui.img import Img
 from kungfu_chess.ui.setup import standard_start_rows
-from kungfu_chess.ui.rendering.board_renderer import BoardRenderer
+from kungfu_chess.ui.rendering.board_renderer import BoardRenderer, COORD_MARGIN_PX
 from kungfu_chess.ui.rendering.piece_renderer import PieceRenderer
 from kungfu_chess.ui.rendering.overlay_renderer import OverlayRenderer, InputState
 from kungfu_chess.ui.rendering.panel_renderer import PanelRenderer, PanelState
@@ -53,12 +52,23 @@ from kungfu_chess.ui.rendering.board_view import BoardView
 from kungfu_chess.ui.rendering.renderer import Renderer
 from kungfu_chess.ui.input.mouse_router import MouseRouter
 from kungfu_chess.ui.events.event_bus import EventBus
-from kungfu_chess.ui.events.events import MoveResolvedEvent
+from kungfu_chess.ui.events.events import JumpResolvedEvent, MoveResolvedEvent
 from kungfu_chess.ui.events.observers.moves_log_observer import MoveLogObserver
 from kungfu_chess.ui.events.observers.score_observer import ScoreObserver
 
-ASSET_ROOT = os.path.join(os.path.dirname(__file__), "sprites", "assets",
-                           "placeholder")
+_SPRITES_DIR = os.path.join(os.path.dirname(__file__), "sprites", "assets")
+_REAL_ASSET_ROOT = os.path.join(_SPRITES_DIR, "assets")
+_PLACEHOLDER_ASSET_ROOT = os.path.join(_SPRITES_DIR, "placeholder")
+
+# Real (hand-authored/downloaded) piece art, if someone's dropped it
+# into `.../sprites/assets/assets/pieces_mine/`, wins over the
+# generated placeholder pack automatically -- no setting to flip.
+# `SpriteLibrary` does its own, independent version of this same
+# detection for loading piece frames; this just decides which folder
+# `board.png` also comes from, since the two travel together.
+ASSET_ROOT = (_REAL_ASSET_ROOT
+              if os.path.isdir(os.path.join(_REAL_ASSET_ROOT, "pieces_mine"))
+              else _PLACEHOLDER_ASSET_ROOT)
 BOARD_BACKGROUND_PATH = os.path.join(ASSET_ROOT, "board.png")
 
 BOARD_COLS = 8
@@ -68,10 +78,11 @@ LEFT_PANEL_WIDTH_PX = 190
 RIGHT_PANEL_WIDTH_PX = 190
 
 # Target overall window height in px. The top/bottom name+score bands
-# split whatever's left over after the board image's own height, so
-# the *total* window height comes out to exactly this value regardless
-# of how tall `board.png` itself turns out to be (see `_Layout`'s own
-# note on measuring the board image rather than assuming a fixed size).
+# split whatever's left over after the board image's own height
+# (`BOARD_ROWS * cell_pixel_size + 2 * COORD_MARGIN_PX`, always exactly
+# that now that `BoardRenderer` draws the margin itself rather than
+# relying on it being baked into whatever board.png happens to be on
+# disk), so the *total* window height comes out to exactly this value.
 TARGET_TOTAL_HEIGHT_PX = 900
 MIN_BAND_HEIGHT_PX = 20
 
@@ -87,12 +98,26 @@ def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
     return engine, controller
 
 
-def wire_event_observers(engine: GameEngine) -> Tuple[MoveLogObserver, ScoreObserver]:
+def wire_event_observers(
+    engine: GameEngine,
+    piece_renderer: Optional[PieceRenderer] = None,
+) -> Tuple[MoveLogObserver, ScoreObserver]:
     """Plan section 4A: bridges GameEngine's settlement-listener hook
     into the UI's own event vocabulary. See module docstring -- this
     function is the sole place a `SettlementEvent` (engine-internal,
     carries live `Piece` values) is ever touched by UI code; everything
-    it hands off downstream (`MoveResolvedEvent`) is a plain-value DTO."""
+    it hands off downstream (`MoveResolvedEvent`) is a plain-value DTO.
+
+    `piece_renderer` (new: animation snap-back feature) is optional and
+    additive -- passing `None` (the old call shape) behaves exactly as
+    before. When given, it's subscribed to `MoveResolvedEvent` the same
+    way `move_log`/`score` already are, purely so it can tell a
+    truncated landing apart from a normal one (see
+    `PieceRenderer.on_move_resolved`) and animate a smooth slide-back
+    instead of snapping. This keeps `BoardView` itself a clean
+    coordinator with zero knowledge of events -- only this composition
+    root wires the renderer to the event bus, exactly like every other
+    observer here."""
     from kungfu_chess.realtime.motion import SettlementEvent  # composition-root-only bridge import
 
     event_bus = EventBus()
@@ -100,14 +125,33 @@ def wire_event_observers(engine: GameEngine) -> Tuple[MoveLogObserver, ScoreObse
     score = ScoreObserver()
     event_bus.subscribe_move_resolved(move_log.on_move_resolved)
     event_bus.subscribe_move_resolved(score.on_move_resolved)
+    if piece_renderer is not None:
+        event_bus.subscribe_move_resolved(piece_renderer.on_move_resolved)
+    # Requirement 3 / hover: jump landings now produce a SettlementEvent
+    # (previously they never did -- see SettlementEvent.move_type's
+    # docstring). JumpResolvedEvent/on_jump_resolved were already
+    # declared for exactly this; this is the first time anything
+    # actually publishes one.
+    event_bus.subscribe_jump_resolved(score.on_jump_resolved)
 
     def on_settlement(event: SettlementEvent) -> None:
+        if event.move_type == 'jump':
+            event_bus.publish_jump_resolved(JumpResolvedEvent(
+                piece_color=event.piece.color,
+                piece_kind=event.piece.kind,
+                row=event.dst[0], col=event.dst[1],
+                captured_piece_kind=event.captured_piece.kind if event.captured_piece else None,
+            ))
+            return
+
         event_bus.publish_move_resolved(MoveResolvedEvent(
             piece_color=event.piece.color,
             piece_kind=event.piece.kind,
             src_row=event.src[0], src_col=event.src[1],
             dst_row=event.dst[0], dst_col=event.dst[1],
             captured_piece_kind=event.captured_piece.kind if event.captured_piece else None,
+            requested_dst_row=event.requested_dst[0] if event.requested_dst else None,
+            requested_dst_col=event.requested_dst[1] if event.requested_dst else None,
         ))
 
     engine.add_settlement_listener(on_settlement)
@@ -121,32 +165,19 @@ class _Layout:
     a tiny plain-value holder (not itself a renderer) so it can be
     passed around and inspected independently of any `Img`/`cv2` state.
 
-    The checkerboard's own file/rank coordinate-label margin (baked
-    into `board.png` by `generate_placeholder_assets.generate_board`)
-    is measured directly from the saved image here, rather than trusted
-    against a hardcoded constant duplicated between the two modules.
-    Bug this fixes: a stale/older `board.png` on disk (e.g. generated
-    before that margin existed, or with a different margin) used to
-    silently misalign every piece from the grid by however much the
-    hardcoded constant and the actual image disagreed -- pieces would
-    render offset from the square they're logically on, since
-    `piece_offset` was computed from the wrong assumed margin. Reading
-    the real image's width/height and comparing it against the known
-    raw board size (`cell_pixel_size * cols/rows`) is self-correcting:
-    whatever margin the image actually has, on-screen piece placement
-    follows it exactly. The top/bottom band heights are likewise derived
-    (not hardcoded): `TARGET_TOTAL_HEIGHT_PX` minus the measured board
-    image height, split evenly, so the window is exactly
-    `TARGET_TOTAL_HEIGHT_PX` tall no matter what size `board.png` is."""
+    `BoardRenderer` owns drawing the file/rank coordinate-label margin
+    (`COORD_MARGIN_PX`) around whatever checkerboard image it's given
+    -- always exactly that many pixels, regardless of the raw board
+    image's own native size (placeholder-generated or a real external
+    asset), since it stretch-fits that image to `cell_pixel_size *
+    cols/rows` first. So the resulting labeled-board image size is pure
+    arithmetic here, nothing needs to be read off disk to compute it."""
 
-    def __init__(self, config: GameConfig, board_background_path: str):
+    def __init__(self, config: GameConfig):
         self.board_w = config.cell_pixel_size * BOARD_COLS
         self.board_h = config.cell_pixel_size * BOARD_ROWS
-
-        checkerboard = Img().read(board_background_path)
-        board_image_w, board_image_h = checkerboard.width, checkerboard.height
-        margin_x = max(0, (board_image_w - self.board_w) // 2)
-        margin_y = max(0, (board_image_h - self.board_h) // 2)
+        board_image_w = self.board_w + 2 * COORD_MARGIN_PX
+        board_image_h = self.board_h + 2 * COORD_MARGIN_PX
 
         leftover = TARGET_TOTAL_HEIGHT_PX - board_image_h
         top_band_height = max(MIN_BAND_HEIGHT_PX, leftover // 2)
@@ -158,10 +189,10 @@ class _Layout:
         self.board_offset_y = top_band_height
 
         # Where the checkerboard's own (0, 0) cell actually starts on
-        # screen -- the measured margin further in than the board
-        # *image's* top-left corner.
-        self.piece_offset = (self.board_offset_x + margin_x,
-                              self.board_offset_y + margin_y)
+        # screen -- always exactly COORD_MARGIN_PX further in than the
+        # board *image's* top-left corner (see class docstring).
+        self.piece_offset = (self.board_offset_x + COORD_MARGIN_PX,
+                              self.board_offset_y + COORD_MARGIN_PX)
 
         self.total_width = LEFT_PANEL_WIDTH_PX + board_image_w + RIGHT_PANEL_WIDTH_PX
         self.total_height = top_band_height + board_image_h + bottom_band_height
@@ -190,16 +221,19 @@ def build_board_view(config: GameConfig = None,
     `layout` too, to size the renderer window and to build `MouseRouter`
     with the matching offset/bounds."""
     config = config or GameConfig()
-    layout = _Layout(config, BOARD_BACKGROUND_PATH)
+    layout = _Layout(config)
 
     board_renderer = BoardRenderer(BOARD_BACKGROUND_PATH,
+                                    cell_pixel_size=config.cell_pixel_size,
+                                    cols=BOARD_COLS, rows=BOARD_ROWS,
                                     board_offset_x=layout.board_offset_x,
                                     board_offset_y=layout.board_offset_y,
                                     total_width=layout.total_width,
                                     total_height=layout.total_height)
     piece_renderer = PieceRenderer(ASSET_ROOT, config.cell_pixel_size, clock=clock,
                                     offset=layout.piece_offset)
-    overlay_renderer = OverlayRenderer(config.cell_pixel_size, offset=layout.piece_offset)
+    overlay_renderer = OverlayRenderer(config.cell_pixel_size, offset=layout.piece_offset,
+                                        clock=clock)
     panel_renderer = PanelRenderer(
         left_panel_x0=0, left_panel_width=LEFT_PANEL_WIDTH_PX,
         right_panel_x0=layout.right_panel_x0, right_panel_width=RIGHT_PANEL_WIDTH_PX,
@@ -250,10 +284,19 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
             last = now
 
             engine.advance_clock(dt_ms)
+            # Movement-range highlight feature: recomputed fresh every
+            # tick straight from the engine, same as `selected` below is
+            # rebuilt fresh from the Controller -- never cached/stale,
+            # and never bypasses GameEngine's own legality gates.
+            selected = controller.selected
+            legal_destinations = (
+                engine.legal_destinations(selected) if selected is not None else ()
+            )
             input_state = InputState(
-                selected=controller.selected,
+                selected=selected,
                 cursor_pos=mouse_router.cursor_pos,
                 last_click_pos=mouse_router.last_click_pos,
+                legal_destinations=legal_destinations,
             )
             panel_state = None
             if move_log is not None or score is not None:
@@ -280,7 +323,7 @@ def main() -> None:  # pragma: no cover
     config = GameConfig()
     engine, controller = build_session(config)
     board_view, layout = build_board_view(config)
-    move_log, score = wire_event_observers(engine)
+    move_log, score = wire_event_observers(engine, board_view.piece_renderer)
     renderer = Cv2Renderer()
     run_loop(engine, controller, board_view, renderer, layout,
              move_log=move_log, score=score)

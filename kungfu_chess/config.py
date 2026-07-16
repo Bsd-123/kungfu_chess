@@ -19,9 +19,12 @@ class GameConfig:
     # game whose pieces all move exactly one square already behaves
     # identically to before.
     move_duration_ms: dict = field(default_factory=dict)
-    default_move_duration_ms: int = 1000
+    # TEMPORARY x2.5 slowdown (requested for easier testing/visibility --
+    # revert both of these two numbers back to 1000 to restore normal
+    # speed; nothing else in the engine depends on this specific value).
+    default_move_duration_ms: int = 2500
 
-    jump_duration_ms: int = 1000
+    jump_duration_ms: int = 2500
     empty_token: str = '.'
     board_marker: str = 'Board:'
     commands_marker: str = 'Commands:'

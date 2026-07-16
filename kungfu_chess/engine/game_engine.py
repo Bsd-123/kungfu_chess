@@ -125,6 +125,76 @@ class GameEngine:
             piece.type, self._config.default_move_duration_ms)
         return _squares_traveled(source, destination) * per_square
 
+    # -- movement-range highlight feature: read-only legality probe -----
+    def legal_destinations(self, source: Position) -> List[Position]:
+        """Every square a click on `source` could actually send that
+        piece to right now: everywhere `request_move(source, dst)` would
+        currently be accepted, plus `source` itself if `request_jump`
+        would currently be accepted (Controller's click-the-same-square
+        gesture). Purely a query -- schedules nothing, mutates nothing --
+        so the UI can call it every single frame while a piece is
+        selected without any side effects, exactly like `is_piece_busy`/
+        `is_target_busy` above.
+
+        Deliberately re-derives legality the same way `request_move`
+        itself does (same busy/target-busy/RuleEngine gates) rather than
+        exposing some cheaper approximation, so the highlighted set can
+        never drift out of sync with what a click would actually do --
+        including the parts of collision handling that only make sense
+        board-wide (`is_target_busy`, current occupancy).
+
+        `validate_move` itself is deliberately shape-only now (design
+        decision #3: no upfront fail-fast rejection for a *requested*
+        move -- the real-time Arbiter resolves actual path blocking
+        dynamically at settlement instead). A yellow highlight is a
+        different promise than "the request won't be rejected", though
+        -- it's read by the player as "you can move here right now" -- so
+        it additionally has to reflect today's real occupancy along the
+        path. Without the extra check below, a queen with any piece
+        sitting in its way would light up every square along the full
+        ray/diagonal past that piece too, even ones the move would never
+        actually reach (it would truncate against a same-color block, or
+        capture and stop, long before getting there): exactly the
+        "marked legal but doesn't actually let me land there" mismatch
+        this closes."""
+        piece = self._state.board.get_piece_at(source)
+        if piece is None or self._state.game_over or self._state.is_piece_busy(source):
+            return []
+
+        board = self._state.board
+        destinations: List[Position] = []
+        for row in range(self._state.nrows):
+            for col in range(self._state.ncols):
+                dst = Position(row, col)
+                if dst == source or self._state.is_target_busy(dst):
+                    continue
+                validation = self._rule_engine.validate_move(board, piece, source, dst)
+                if not validation.is_valid:
+                    continue
+
+                # `get_path(...)[:-1]` is every square strictly between
+                # source and dst -- empty for a knight, which has no
+                # in-between squares at all. If any of those is occupied
+                # *right now* (by either color), this destination isn't
+                # actually reachable this instant, so it's left off the
+                # highlight list. Landing exactly on the first blocker is
+                # still shown when that blocker is an enemy piece (a
+                # real, reachable capture) -- `validate_move` already
+                # refused a friendly destination itself via
+                # `BaseMovementRule`, so nothing further is needed for
+                # that case here.
+                path = board.get_path(source, dst)
+                if any(not board.is_empty_at(sq) for sq in path[:-1]):
+                    continue
+
+                destinations.append(dst)
+
+        # request_jump's own gate is just game_over/busy -- both already
+        # checked above -- so a jump is always available here; it has no
+        # separate destination of its own, it's the piece's own square.
+        destinations.append(source)
+        return destinations
+
     def request_jump(self, position: Position) -> bool:
         """Jumps bypass RuleEngine validation (there is no destination
         to validate against) and are exempt from the target-busy check
@@ -217,8 +287,21 @@ class GameEngine:
                     progress = 1.0 if span <= 0 else min(1.0, max(0.0,
                         (self._state.clock_ms - motion.start_time) / span))
                     if motion.move_type == "move" and motion.dst is not None:
-                        dst_x = motion.dst[1] * cell
-                        dst_y = motion.dst[0] * cell
+                        # Rendering-only live preview (Spec §12 -- still
+                        # just plain ints on this DTO, no live domain
+                        # object leaks): where this move would land
+                        # against the board's *current* occupancy right
+                        # now, not blindly the originally requested
+                        # square. Makes a sliding piece visually stop at
+                        # (or capture) whatever is actually in its path
+                        # as the animation reaches it, instead of always
+                        # gliding straight through to `motion.dst` and
+                        # only correcting after the fact at settlement --
+                        # see RealTimeArbiter.preview_landing_square.
+                        preview_square = self._state.arbiter.preview_landing_square(
+                            motion, board)
+                        dst_x = preview_square[1] * cell
+                        dst_y = preview_square[0] * cell
                     else:
                         dst_x, dst_y = None, None
 

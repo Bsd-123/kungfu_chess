@@ -56,6 +56,21 @@ class BoardInterface(ABC):
         through a generic square-by-square walk."""
 
     @abstractmethod
+    def get_path(self, src: Position, dst: Position) -> List[Position]:
+        """Ordered list of squares from (but excluding) src to (and
+        including) dst, in travel order. For a straight orthogonal or
+        diagonal line this is every intermediate square plus the
+        destination; for any other displacement (a knight's L-shape)
+        there are no intermediate squares, so this degenerates to
+        `[dst]`. This is the single source of truth for "what squares
+        does a move pass through" -- the real-time Arbiter walks this
+        list at settlement time to resolve mid-path collisions (a
+        friendly piece in the way truncates the move there; an enemy
+        piece is captured there), so it lives next to `path_clear` as a
+        board-storage capability rather than being recomputed ad hoc by
+        callers."""
+
+    @abstractmethod
     def to_rows(self) -> List[List[str]]:
         """Snapshot the board as rows of raw tokens, for rendering/export.
         This is a serialization concern (text in, text out) and is the
@@ -120,6 +135,27 @@ class ArrayBoard(BoardInterface):
             r += dr
             c += dc
         return True
+
+    def get_path(self, src: Position, dst: Position) -> List[Position]:
+        r1, c1 = src
+        r2, c2 = dst
+        dr = _direction(r1, r2)
+        dc = _direction(c1, c2)
+        is_straight_line = (r1 == r2) or (c1 == c2) or (abs(r2 - r1) == abs(c2 - c1))
+        if not is_straight_line:
+            # Knight (or any other non-sliding displacement): no square
+            # is ever "passed through", the move either lands or doesn't.
+            return [Position(r2, c2)]
+
+        path: List[Position] = []
+        r, c = r1 + dr, c1 + dc
+        while True:
+            path.append(Position(r, c))
+            if (r, c) == (r2, c2):
+                break
+            r += dr
+            c += dc
+        return path
 
     def to_rows(self) -> List[List[str]]:
         return [list(row) for row in self._grid]
