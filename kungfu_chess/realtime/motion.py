@@ -1,7 +1,7 @@
 from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from kungfu_chess.model.position import Position
 from kungfu_chess.model.piece import Piece
@@ -47,6 +47,17 @@ class PendingMove:
     # existing callers) is unaffected; `MoveScheduler.schedule` always
     # overwrites it with the real sequence number.
     seq: int = 0
+
+    # Post-move cooldown feature: how long, in ms, the landing square
+    # should refuse a new motion once *this* motion settles. GameEngine
+    # computes this the same way it computes `duration_ms` (per piece
+    # type, via GameConfig) and hands it in at scheduling time -- the
+    # Arbiter stays a pure timing/collision service that never looks up
+    # a piece type itself, it just faithfully starts a cooldown of
+    # whatever length it's told once this motion resolves. Defaults to
+    # 0 (no cooldown) so any existing caller/test that builds a
+    # PendingMove positionally is unaffected.
+    cooldown_ms: int = 0
 
 
 @dataclass
@@ -111,6 +122,15 @@ class MoveScheduler:
     def __init__(self):
         self._pending: List[PendingMove] = []
         self._seq_counter = itertools.count()
+
+        # Post-move cooldown bookkeeping: one entry per square currently
+        # cooling down, `(until_ms, duration_ms)`. Keyed by Position
+        # (not piece identity -- boards here never have one, see
+        # `ArrayBoard.get_piece_at`'s docstring), so a later motion that
+        # settles on the same square just overwrites the old entry; the
+        # dict can therefore never grow past `nrows * ncols` entries,
+        # nothing further needs to actively prune it.
+        self._cooldowns: Dict[Position, Tuple[int, int]] = {}
 
     def _has_expired(self, complete_time:int , clock_ms: int):
         return complete_time > clock_ms
@@ -179,3 +199,34 @@ class MoveScheduler:
     @property
     def pending_moves(self) -> List[PendingMove]:
         return list(self._pending)
+
+    # -- post-move cooldown feature ---------------------------------------
+    def start_cooldown(self, pos: Position, until_ms: int, duration_ms: int) -> None:
+        """Records that `pos` can't host a new motion until `until_ms`.
+        `duration_ms` (the total length of this cooldown) is kept
+        alongside so `cooldown_progress` can report an elapsed fraction
+        for the animation, not just a plain yes/no."""
+        self._cooldowns[pos] = (until_ms, duration_ms)
+
+    def is_cooling_down(self, pos: Position, clock_ms: int) -> bool:
+        entry = self._cooldowns.get(pos)
+        return entry is not None and entry[0] > clock_ms
+
+    def cooldown_progress(self, pos: Position, clock_ms: int) -> Optional[float]:
+        """`0.0` (just settled, full cooldown remaining) -> `1.0`
+        (finished) fraction of the cooldown elapsed, or `None` if `pos`
+        isn't currently cooling down at all -- mirrors `PendingMove`'s
+        own `motion_progress` shape so the rendering side can treat both
+        the same way. `duration_ms <= 0` can't happen for an entry that
+        was ever actually stored (cooldown-starting call sites only ever
+        call `start_cooldown` when `cooldown_ms > 0`), but is guarded
+        against anyway rather than trusting that invariant here too."""
+        entry = self._cooldowns.get(pos)
+        if entry is None:
+            return None
+        until_ms, duration_ms = entry
+        if until_ms <= clock_ms or duration_ms <= 0:
+            return None
+        remaining_ms = until_ms - clock_ms
+        elapsed_ms = duration_ms - remaining_ms
+        return max(0.0, min(1.0, elapsed_ms / duration_ms))

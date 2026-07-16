@@ -39,6 +39,23 @@ FADE_DURATION_MS = 220.0
 # not a leisurely rebound -- but never an instant pop.
 CORRECTION_DURATION_MS = 180.0
 
+# Post-move cooldown feature: a translucent orange "cooldown wheel"
+# drawn over a piece while its square is still recovering -- a filled
+# pie wedge that starts covering the whole piece (just settled, full
+# cooldown remaining, drawn only once the settlement that starts the
+# cooldown has actually happened -- see GameEngine.snapshot's
+# cooldown_progress, sourced from RealTimeArbiter._maybe_start_cooldown,
+# which only ever fires after a motion resolves, never before or during
+# it) and sweeps clockwise down to nothing as the cooldown finishes, the
+# same visual language as an ability-cooldown icon in most real-time
+# games. Kept translucent (not opaque) so the piece underneath stays
+# identifiable the entire time, and given its own distinct color
+# (orange, not yellow) so it's never confused with the movement-range
+# highlight, which means something different ("you can move here")
+# even though both are square-sized overlays.
+COOLDOWN_OVERLAY_COLOR = (0, 140, 255, 150)  # BGRA -- orange
+COOLDOWN_WHEEL_RADIUS_RATIO = 0.46
+
 
 @dataclass
 class _Tracked:
@@ -140,6 +157,38 @@ class PieceRenderer:
 
     def _cell_of(self, piece: PieceSnapshot) -> Position:
         return Position(piece.pixel_y // self._cell, piece.pixel_x // self._cell)
+
+    # -- post-move cooldown feature: the "cooldown wheel" animation ------
+    def _draw_cooldown_overlay(self, frame: Img, x: int, y: int, progress: float) -> None:
+        """Draws the remaining-cooldown wedge on top of a piece already
+        painted at `(x, y)` (screen-space, offset already applied).
+        `progress` is `0.0` (just settled) -> `1.0` (finished); the wedge
+        itself is drawn as *remaining* fraction, `1.0 - progress`, so it
+        starts as a full circle covering the piece and sweeps away to
+        nothing, clockwise from 12 o'clock, as the cooldown counts down
+        -- "an animation that shows the waiting time passing", not just
+        a static tint.
+
+        Built as a small transparent `cell x cell` tile with the wedge
+        painted onto *that* (opaque, within the tile), then composited
+        onto `frame` via `Img.draw_on`'s real alpha-blending -- drawing
+        a translucent color directly onto `frame` with `draw_ellipse`
+        would only *store* that alpha value, never blend it, since plain
+        cv2 drawing calls overwrite pixels rather than compositing them
+        (the same reason `OverlayRenderer`'s move highlight uses this
+        same tile-then-`draw_on` approach instead of drawing straight
+        onto the frame)."""
+        remaining = 1.0 - progress
+        if remaining <= 0.0:
+            return
+
+        tile = Img.new(self._cell, self._cell, channels=4, color=(0, 0, 0, 0))
+        cx, cy = self._cell // 2, self._cell // 2
+        radius = int(self._cell * COOLDOWN_WHEEL_RADIUS_RATIO)
+        end_angle = -90 + 360 * remaining
+        tile.draw_ellipse(cx, cy, (radius, radius), COOLDOWN_OVERLAY_COLOR,
+                           start_angle=-90, end_angle=end_angle)
+        frame.draw_on(tile, x, y)
 
     def _interpolated_position(self, piece: PieceSnapshot) -> Tuple[int, int]:
         if piece.state == "move" and piece.dst_pixel_x is not None:
@@ -246,6 +295,10 @@ class PieceRenderer:
             off_x, off_y = self._offset
             frame.draw_on(tracked.sprite.current_frame(),
                            render_x + off_x, render_y + off_y)
+
+            if piece.cooldown_progress is not None:
+                self._draw_cooldown_overlay(frame, render_x + off_x, render_y + off_y,
+                                             piece.cooldown_progress)
 
         # A key tracked last frame but missing now either settled
         # normally (its key just moved to the destination cell, handled

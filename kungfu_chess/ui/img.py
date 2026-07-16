@@ -179,12 +179,21 @@ class Img:
 
     def draw_ellipse(self, cx: int, cy: int, axes: Tuple[int, int],
                       color: Tuple[int, ...], angle: float = 0.0,
+                      start_angle: float = 0.0, end_angle: float = 360.0,
                       thickness: int = -1) -> "Img":
         """`axes = (rx, ry)` -- half-width/half-height, matching cv2's
         own convention. Added for Phase 4 placeholder animation frames
         (squash/stretch jump poses) -- same thin cv2-wrapper philosophy
-        as every other primitive here."""
-        cv2.ellipse(self.array, (cx, cy), axes, angle, 0, 360,
+        as every other primitive here.
+
+        `start_angle`/`end_angle` (post-move cooldown feature): degrees,
+        cv2's own convention (0 = 3 o'clock, increasing clockwise).
+        Defaulted to the original full `0..360` sweep, so every existing
+        call site (a full ellipse/circle-ish shape) is unaffected --
+        passing a narrower range draws just that arc, and with the
+        default `thickness=-1` fills it as a pie-slice wedge, which is
+        exactly the "cooldown wheel" shape `PieceRenderer` needs."""
+        cv2.ellipse(self.array, (cx, cy), axes, angle, start_angle, end_angle,
                     self._full_color(color), thickness)
         return self
 

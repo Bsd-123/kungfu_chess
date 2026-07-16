@@ -16,7 +16,7 @@ looks translucent if it's composited in via `draw_on`."""
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from kungfu_chess.ui.img import Img
 from kungfu_chess.view.game_snapshot import GameSnapshot
@@ -52,38 +52,80 @@ def _ease_out_bounce(t: float) -> float:
 
 class ToastRenderer:
     def __init__(self, center_x: int, center_y: int,
-                 clock: Callable[[], float] = time.perf_counter):
+                 clock: Callable[[], float] = time.perf_counter,
+                 player_names: Tuple[str, str] = ("White", "Black")):
         """`center_x`/`center_y` -- screen-space point the toast is
         centered on at rest (typically the board's own center, passed
         in by the composition root). `clock` mirrors `PieceRenderer`'s
         own DI pattern, so the bounce timing is independently testable
-        with a fake clock rather than tied to real wall time."""
+        with a fake clock rather than tied to real wall time.
+
+        `player_names` (game-over-toast winner feature): `(white_name,
+        black_name)`, the same tuple/ordering `PanelState`'s own
+        white/black fields already use -- lets this renderer turn
+        `GameSnapshot.winner`'s plain `'w'`/`'b'` color code into a
+        display name without ever reaching back into engine state; the
+        renderer only ever sees what's handed to it, same as every
+        other collaborator here."""
         self._center_x = center_x
         self._center_y = center_y
         self._clock = clock
+        self._player_names = player_names
         self._start_time: Optional[float] = None
-        self._toast = self._build_toast()
+        self._toast: Optional[Img] = None
 
-    def _build_toast(self) -> Img:
+    def _winner_name(self, winner: Optional[str]) -> Optional[str]:
+        white_name, black_name = self._player_names
+        if winner == 'w':
+            return white_name
+        if winner == 'b':
+            return black_name
+        return None
+
+    def _build_toast(self, winner: Optional[str]) -> Img:
+        """Built fresh once per game-over transition (see `draw`), not
+        once at construction time like the old static "GAME OVER"-only
+        box -- the winner isn't known until the game actually ends, so
+        the text (and the box's required height) can't be baked in up
+        front any more."""
+        winner_name = self._winner_name(winner)
+        lines = ["GAME OVER"]
+        if winner_name is not None:
+            lines.append(f"{winner_name} Wins!")
+
         box = Img.new(BOX_WIDTH, BOX_HEIGHT, channels=4, color=BOX_BG_COLOR)
         box.draw_rect(0, 0, BOX_WIDTH - 1, BOX_HEIGHT - 1, BOX_BORDER_COLOR, thickness=3)
-        text = "GAME OVER"
-        text_w, text_h = box.text_size(text, font_scale=1.0, thickness=2)
-        box.put_text(text, BOX_WIDTH // 2 - text_w // 2, BOX_HEIGHT // 2 + text_h // 2,
-                      TEXT_COLOR, font_scale=1.0, thickness=2)
+
+        if len(lines) == 1:
+            text_w, text_h = box.text_size(lines[0], font_scale=1.0, thickness=2)
+            box.put_text(lines[0], BOX_WIDTH // 2 - text_w // 2,
+                          BOX_HEIGHT // 2 + text_h // 2, TEXT_COLOR,
+                          font_scale=1.0, thickness=2)
+        else:
+            title_w, title_h = box.text_size(lines[0], font_scale=1.0, thickness=2)
+            box.put_text(lines[0], BOX_WIDTH // 2 - title_w // 2,
+                          BOX_HEIGHT // 2 - 8, TEXT_COLOR, font_scale=1.0, thickness=2)
+
+            sub_w, sub_h = box.text_size(lines[1], font_scale=0.7, thickness=2)
+            box.put_text(lines[1], BOX_WIDTH // 2 - sub_w // 2,
+                          BOX_HEIGHT // 2 + 8 + sub_h, TEXT_COLOR,
+                          font_scale=0.7, thickness=2)
         return box
 
     def draw(self, frame: Img, snapshot: GameSnapshot) -> None:
         if not snapshot.game_over:
             # Not (or no longer) game-over -- reset so a fresh game
-            # replays the bounce-in rather than snapping straight to
-            # the resting position on the next game-over.
+            # replays the bounce-in (and rebuilds the toast for whoever
+            # wins *that* game) rather than snapping straight to the
+            # resting position, or showing a stale winner, next time.
             self._start_time = None
+            self._toast = None
             return
 
         now = self._clock()
         if self._start_time is None:
             self._start_time = now
+            self._toast = self._build_toast(snapshot.winner)
         elapsed_ms = (now - self._start_time) * 1000.0
         progress = min(1.0, elapsed_ms / DURATION_MS)
         eased = _ease_out_bounce(progress)

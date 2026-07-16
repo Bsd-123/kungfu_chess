@@ -40,6 +40,14 @@ class PieceSnapshot:
     dst_pixel_x: Optional[int] = None
     dst_pixel_y: Optional[int] = None
 
+    # Post-move cooldown feature: `0.0` (just settled, cooldown just
+    # started) -> `1.0` (finished) fraction of this square's post-move
+    # cooldown elapsed, or `None` whenever the square isn't cooling down
+    # at all. Same additive/backward-compatible shape as the Phase 4
+    # fields above -- defaults to None so anything written before this
+    # feature existed still works unchanged.
+    cooldown_progress: Optional[float] = None
+
 
 @dataclass(frozen=True)
 class GameSnapshot:
@@ -53,3 +61,14 @@ class GameSnapshot:
     pieces: List[PieceSnapshot]
     selected: Optional[Position]
     game_over: bool
+
+    # Game-over-toast winner feature: the color ('w'/'b') whose move
+    # triggered Rule 11's King-capture game-over, or `None` while the
+    # game hasn't ended (or, in principle, if game_over were ever set
+    # some other way that has no single winning side). Additive/
+    # backward-compatible -- defaults to None, so any existing
+    # construction of GameSnapshot still works unchanged. A renderer
+    # maps this plain color code to a display name itself (e.g. via the
+    # same `player_names` tuple the side panel already uses) -- this
+    # stays a plain value, never a live Piece/engine reference.
+    winner: Optional[str] = None

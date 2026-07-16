@@ -86,6 +86,12 @@ RIGHT_PANEL_WIDTH_PX = 190
 TARGET_TOTAL_HEIGHT_PX = 900
 MIN_BAND_HEIGHT_PX = 20
 
+# Game-over-toast winner feature: single source of truth for the
+# player-name default, shared by `build_board_view` (wires it into
+# `ToastRenderer`) and `run_loop` (already used it for `PanelState`) so
+# the two can never drift apart from each other.
+DEFAULT_PLAYER_NAMES: Tuple[str, str] = ("White", "Black")
+
 
 def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
     """Boots one GameEngine + one Controller for the session, mirroring
@@ -204,7 +210,9 @@ class _Layout:
 
 
 def build_board_view(config: GameConfig = None,
-                      clock: Callable[[], float] = time.perf_counter) -> Tuple[BoardView, _Layout]:
+                      clock: Callable[[], float] = time.perf_counter,
+                      player_names: Tuple[str, str] = DEFAULT_PLAYER_NAMES
+                      ) -> Tuple[BoardView, _Layout]:
     """`BoardView` as a thin coordinator over `BoardRenderer` (Phase 1
     background, now widened for the dual side-panel + top/bottom-band
     layout), `PieceRenderer` (Phase 1 compositing, Phase 4 interpolation
@@ -246,6 +254,7 @@ def build_board_view(config: GameConfig = None,
         center_x=layout.board_offset_x + layout.board_image_w // 2,
         center_y=layout.board_offset_y + layout.board_image_h // 2,
         clock=clock,
+        player_names=player_names,
     )
     board_view = BoardView(board_renderer, piece_renderer, overlay_renderer,
                             panel_renderer, toast_renderer)
@@ -256,7 +265,7 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
              renderer: Renderer, layout: _Layout,
              move_log: Optional[MoveLogObserver] = None,
              score: Optional[ScoreObserver] = None,
-             player_names: Tuple[str, str] = ("White", "Black"),
+             player_names: Tuple[str, str] = DEFAULT_PLAYER_NAMES,
              clock: Callable[[], float] = time.perf_counter) -> None:
     """Phase 2's real-time loop, extended in Phase 3 with mouse input
     and in Phase 5 with a live side panel. Each tick: measure actual

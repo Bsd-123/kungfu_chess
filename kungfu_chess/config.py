@@ -25,6 +25,32 @@ class GameConfig:
     default_move_duration_ms: int = 2500
 
     jump_duration_ms: int = 2500
+
+    # Post-move cooldown (new feature): after a piece's motion settles,
+    # it cannot start another motion from its landing square for this
+    # long -- other pieces are completely unaffected. Keyed by piece
+    # type the same way `move_duration_ms` is, falling back to
+    # `default_cooldown_ms` for any type not present. `0` disables
+    # cooldown entirely for that piece type (the pre-existing, always-
+    # available-again-instantly behavior).
+    # TEMPORARY x2 lengthening (requested for easier testing/visibility --
+    # halve both of these two numbers back to 500/200 to restore the
+    # original cooldown lengths; nothing else in the engine depends on
+    # these specific values).
+    cooldown_ms: dict = field(default_factory=dict)
+    default_cooldown_ms: int = 1000
+
+    # Post-jump cooldown: a separate, shorter recovery window for a jump
+    # landing (as opposed to a completed slide/move). Same per-piece-
+    # type-override-with-a-default shape as `cooldown_ms`/
+    # `default_cooldown_ms` above, kept as its own pair rather than
+    # reusing the move ones so a jump's recovery can be tuned
+    # independently -- a jump is a much shorter, snappier action than a
+    # multi-square slide, so its landing square shouldn't have to wait
+    # just as long before it can act again.
+    jump_cooldown_ms: dict = field(default_factory=dict)
+    default_jump_cooldown_ms: int = 400
+
     empty_token: str = '.'
     board_marker: str = 'Board:'
     commands_marker: str = 'Commands:'

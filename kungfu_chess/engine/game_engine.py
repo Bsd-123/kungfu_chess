@@ -82,6 +82,9 @@ class GameEngine:
     def is_target_busy(self, pos: Position) -> bool:
         return self._state.is_target_busy(pos)
 
+    def is_cooling_down(self, pos: Position) -> bool:
+        return self._state.is_cooling_down(pos)
+
     # -- Rule 8: request_move as the application-service entry point --
     def request_move(self, source: Position, destination: Position) -> MoveResult:
         """Sequential checks, in the exact order mandated by Rule 8/section 9:
@@ -90,11 +93,15 @@ class GameEngine:
            this piece as its source (busy), OR another
            motion already converging on this exact
            destination cell (target-busy)?             -> "motion_in_progress"
-        3. Does the RuleEngine validate and approve
+        3. Is this piece's square still cooling down
+           from a motion that settled here recently?   -> "cooldown"
+        4. Does the RuleEngine validate and approve
            the move?                                   -> its own reason
-        4. If approved: schedule the Motion with the
+        5. If approved: schedule the Motion with the
            RealTimeArbiter, with a duration computed
-           from squares traveled (Spec section 10).            -> "ok"
+           from squares traveled (Spec section 10) and a
+           post-move cooldown for its landing square
+           (post-move cooldown feature).                -> "ok"
         Returns a MoveResult; `bool(result)` still works exactly like
         the old plain-bool return for any caller that doesn't care about
         the reason."""
@@ -104,6 +111,9 @@ class GameEngine:
         if self._state.is_piece_busy(source) or self._state.is_target_busy(destination):
             return MoveResult(False, "motion_in_progress")
 
+        if self._state.is_cooling_down(source):
+            return MoveResult(False, "cooldown")
+
         piece = self._state.board.get_piece_at(source)
 
         validation = self._rule_engine.validate_move(
@@ -112,7 +122,8 @@ class GameEngine:
             return MoveResult(False, validation.reason)
 
         duration = self._move_duration_ms(piece, source, destination)
-        self._state.schedule_move(source, destination, piece, duration)
+        cooldown = self._cooldown_ms_for(piece)
+        self._state.schedule_move(source, destination, piece, duration, cooldown)
         return MoveResult(True, "ok")
 
     def _move_duration_ms(self, piece, source: Position, destination: Position) -> int:
@@ -124,6 +135,27 @@ class GameEngine:
         per_square = self._config.move_duration_ms.get(
             piece.type, self._config.default_move_duration_ms)
         return _squares_traveled(source, destination) * per_square
+
+    def _cooldown_ms_for(self, piece) -> int:
+        """Post-move cooldown feature: how long, in ms, `piece`'s landing
+        square should refuse a new motion once this one settles. Same
+        per-piece-type-override-with-a-default shape as
+        `_move_duration_ms` (`GameConfig.cooldown_ms` / `.
+        default_cooldown_ms`), computed once here rather than in the
+        Arbiter so the Arbiter never has to know a piece *type* exists
+        -- it just faithfully starts whatever cooldown length it's
+        handed at scheduling time, the same delegation already used for
+        `duration_ms`."""
+        return self._config.cooldown_ms.get(piece.type, self._config.default_cooldown_ms)
+
+    def _jump_cooldown_ms_for(self, piece) -> int:
+        """Post-jump cooldown: a jump's landing square recovers on its
+        own, shorter schedule (`GameConfig.jump_cooldown_ms` /
+        `.default_jump_cooldown_ms`, distinct from the move ones above)
+        -- deliberately not reusing `_cooldown_ms_for`, since a jump is
+        a much snappier action than a multi-square slide and shouldn't
+        make its own square wait just as long before it can act again."""
+        return self._config.jump_cooldown_ms.get(piece.type, self._config.default_jump_cooldown_ms)
 
     # -- movement-range highlight feature: read-only legality probe -----
     def legal_destinations(self, source: Position) -> List[Position]:
@@ -156,9 +188,15 @@ class GameEngine:
         actually reach (it would truncate against a same-color block, or
         capture and stop, long before getting there): exactly the
         "marked legal but doesn't actually let me land there" mismatch
-        this closes."""
+        this closes. The post-move cooldown feature adds one more gate
+        here (mirroring `request_move`'s own new "cooldown" rejection
+        reason): a piece still cooling down shows no highlights at all,
+        same as a busy piece -- it can't actually move anywhere right
+        now either."""
         piece = self._state.board.get_piece_at(source)
-        if piece is None or self._state.game_over or self._state.is_piece_busy(source):
+        if (piece is None or self._state.game_over
+                or self._state.is_piece_busy(source)
+                or self._state.is_cooling_down(source)):
             return []
 
         board = self._state.board
@@ -199,19 +237,24 @@ class GameEngine:
         """Jumps bypass RuleEngine validation (there is no destination
         to validate against) and are exempt from the target-busy check
         (an airborne piece isn't converging on a shared destination
-        square the way a move is) but still respect the game-over and
-        busy-piece checks, mirroring the same ordering as request_move."""
+        square the way a move is) but still respect the game-over,
+        busy-piece, and (post-move cooldown feature) still-cooling-down
+        checks, mirroring the same ordering as request_move."""
         if self._state.game_over:
             return False
 
         if self._state.is_piece_busy(position):
             return False
 
+        if self._state.is_cooling_down(position):
+            return False
+
         piece = self._state.board.get_piece_at(position)
         if piece is None:
             return False
 
-        self._state.schedule_jump(position, piece, self._config.jump_duration_ms)
+        cooldown = self._jump_cooldown_ms_for(piece)
+        self._state.schedule_jump(position, piece, self._config.jump_duration_ms, cooldown)
         return True
 
     # -- Phase 5 (final_plan_verified.md section 4A): optional observer
@@ -246,6 +289,11 @@ class GameEngine:
         for event in events:
             if event.captured_piece is not None and event.captured_piece.type == 'K':
                 self._state.game_over = True
+                # Game-over-toast winner feature: the side that just
+                # captured the King is the winner -- `event.piece` is
+                # whichever piece's motion produced this SettlementEvent,
+                # i.e. the capturing piece, not the captured King.
+                self._state.winner_color = event.piece.color
             for listener in self._settlement_listeners:
                 listener(event)
 
@@ -305,6 +353,17 @@ class GameEngine:
                     else:
                         dst_x, dst_y = None, None
 
+                # Post-move cooldown feature: purely additive to this
+                # DTO, same as everything else here -- `None` whenever
+                # this square isn't cooling down (the overwhelmingly
+                # common case, and always the case when
+                # `default_cooldown_ms`/the per-type override is 0), a
+                # 0.0->1.0 elapsed fraction otherwise, for the renderer's
+                # cooldown-wheel animation to draw from directly without
+                # a separate per-square query call.
+                cooldown_progress = self._state.arbiter.cooldown_progress(
+                    Position(row, col), self._state.clock_ms)
+
                 pieces.append(PieceSnapshot(
                     kind=piece.kind,
                     color=piece.color,
@@ -314,6 +373,7 @@ class GameEngine:
                     motion_progress=progress,
                     dst_pixel_x=dst_x,
                     dst_pixel_y=dst_y,
+                    cooldown_progress=cooldown_progress,
                 ))
 
         return GameSnapshot(
@@ -322,4 +382,5 @@ class GameEngine:
             pieces=pieces,
             selected=self._state.selected,
             game_over=self._state.game_over,
+            winner=self._state.winner_color,
         )

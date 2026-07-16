@@ -56,31 +56,45 @@ class RealTimeArbiter:
     def is_active_airborne_at(self, cell: Position, clock_ms: int) -> bool:
         return self._scheduler.is_active_airborne_at(cell, clock_ms)
 
+    # -- post-move cooldown feature ---------------------------------------
+    def is_cooling_down(self, pos: Position, clock_ms: int) -> bool:
+        return self._scheduler.is_cooling_down(pos, clock_ms)
+
+    def cooldown_progress(self, pos: Position, clock_ms: int) -> Optional[float]:
+        return self._scheduler.cooldown_progress(pos, clock_ms)
+
     # -- scheduling ------------------------------------------------------
     def schedule_move(self, src: Position, dst: Position, piece: Piece,
                        clock_ms: int, duration_ms: int,
-                       board: BoardInterface) -> None:
+                       board: BoardInterface, cooldown_ms: int = 0) -> None:
         # The ordered list of squares this move will pass through is
         # geometry, not timing -- computed once, here, from the board's
         # own `get_path` (the single source of truth for "what squares
         # does this move cross", shared with any future path-preview UI)
         # and carried on the PendingMove so resolution never has to
-        # re-derive piece-shape rules.
+        # re-derive piece-shape rules. `cooldown_ms` (0 by default, fully
+        # backward compatible) rides along the same way `duration_ms`
+        # does -- GameEngine decides how long, per piece type, via
+        # GameConfig; this class just faithfully starts that cooldown on
+        # the landing square once the move settles.
         self._scheduler.schedule(PendingMove(
             move_type='move',
             complete_time=clock_ms + duration_ms,
             src=src, dst=dst, piece=piece,
             start_time=clock_ms,
             path=board.get_path(src, dst),
+            cooldown_ms=cooldown_ms,
         ))
 
     def schedule_jump(self, src: Position, piece: Piece,
-                       clock_ms: int, duration_ms: int) -> None:
+                       clock_ms: int, duration_ms: int,
+                       cooldown_ms: int = 0) -> None:
         self._scheduler.schedule(PendingMove(
             move_type='jump',
             complete_time=clock_ms + duration_ms,
             src=src, piece=piece,
             start_time=clock_ms,
+            cooldown_ms=cooldown_ms,
         ))
 
     @property
@@ -266,11 +280,25 @@ class RealTimeArbiter:
         if landing_square != m.src:
             board.set_piece_at(m.src, None)
 
+        self._maybe_start_cooldown(m, landing_square)
+
         return SettlementEvent(
             src=m.src, dst=landing_square, piece=settled_piece,
             captured_piece=captured_piece, move_type='move',
             requested_dst=m.dst,
         )
+
+    def _maybe_start_cooldown(self, m: PendingMove, landing_square: Position) -> None:
+        """Post-move cooldown feature: as soon as `m` actually settles
+        (on whatever square it truly landed on -- `landing_square`, not
+        necessarily `m.dst`, since a truncated/captured landing still
+        starts the cooldown right where the piece ended up), that square
+        can't host another motion for `m.cooldown_ms`. A no-op when
+        `cooldown_ms` is 0 (the default), so this is fully inert for any
+        caller that never opted into the feature."""
+        if m.cooldown_ms > 0:
+            self._scheduler.start_cooldown(
+                landing_square, m.complete_time + m.cooldown_ms, m.cooldown_ms)
 
     def _advance_through_path(self, m: PendingMove,
                                board: BoardInterface) -> Tuple[Position, Optional[Piece]]:
@@ -411,6 +439,7 @@ class RealTimeArbiter:
         occupant = board.get_piece_at(m.src)
 
         if occupant == m.piece:
+            self._maybe_start_cooldown(m, m.src)
             return SettlementEvent(
                 src=m.src, dst=m.src, piece=m.piece,
                 captured_piece=None, move_type='jump',
@@ -420,12 +449,14 @@ class RealTimeArbiter:
             # Defensive fallback only -- see docstring. No board
             # mutation: the friendly piece already there keeps the
             # square, and nothing is captured in either direction.
+            self._maybe_start_cooldown(m, m.src)
             return SettlementEvent(
                 src=m.src, dst=m.src, piece=m.piece,
                 captured_piece=None, move_type='jump', reverted=True,
             )
 
         board.set_piece_at(m.src, m.piece)
+        self._maybe_start_cooldown(m, m.src)
         return SettlementEvent(
             src=m.src, dst=m.src, piece=m.piece,
             captured_piece=occupant, move_type='jump',

@@ -27,6 +27,14 @@ class GameState:
         self.output_chunks: List[str] = []
         self.game_over = False
 
+        # Game-over-toast winner feature: which color's move actually
+        # ended the game (Rule 11's King-capture trigger) -- 'w'/'b', or
+        # None while the game is still in progress. Set once, alongside
+        # `game_over`, by GameEngine.settle(); read back out through the
+        # Spec §12 snapshot boundary so a renderer can show a winner's
+        # name without reaching into live engine state.
+        self.winner_color: Optional[str] = None
+
     @property
     def nrows(self) -> int:
         return self.board.nrows
@@ -47,10 +55,19 @@ class GameState:
     def is_active_airborne_at(self, cell: Position) -> bool:
         return self.arbiter.is_active_airborne_at(cell, self.clock_ms)
 
-    def schedule_move(self, src: Position, dst: Position, piece: Piece, duration_ms: int) -> None:
-        self.arbiter.schedule_move(src, dst, piece, self.clock_ms, duration_ms, self.board)
+    def is_cooling_down(self, pos: Position) -> bool:
+        """Post-move cooldown feature: is `pos` still recovering from a
+        motion that settled there recently? Same delegate-to-Arbiter,
+        forward-the-clock shape as every other query here."""
+        return self.arbiter.is_cooling_down(pos, self.clock_ms)
 
-    def schedule_jump(self, src: Position, piece: Piece, duration_ms: int) -> None:
+    def schedule_move(self, src: Position, dst: Position, piece: Piece,
+                       duration_ms: int, cooldown_ms: int = 0) -> None:
+        self.arbiter.schedule_move(src, dst, piece, self.clock_ms, duration_ms,
+                                    self.board, cooldown_ms)
+
+    def schedule_jump(self, src: Position, piece: Piece, duration_ms: int,
+                       cooldown_ms: int = 0) -> None:
         # Deliberately does NOT clear the board cell: the piece must
         # stay visible/renderable at its square for the whole hover (the
         # snapshot layer only ever draws what board.get_piece_at
@@ -60,4 +77,4 @@ class GameState:
         # top of the literal board content -- see
         # RealTimeArbiter._advance_through_path -- rather than something
         # achieved by actually removing the piece from the board.
-        self.arbiter.schedule_jump(src, piece, self.clock_ms, duration_ms)
+        self.arbiter.schedule_jump(src, piece, self.clock_ms, duration_ms, cooldown_ms)
