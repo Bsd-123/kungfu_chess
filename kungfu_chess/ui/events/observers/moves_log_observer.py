@@ -1,13 +1,17 @@
 """Appends `(time, move_text)` per side on settle. `clock_ms_source` is a
 zero-arg callable (not a stored engine ref) so it's easily faked in
 tests. Move text is "SAN-lite" -- no disambiguation or check/mate
-suffixes, since the engine doesn't expose those concepts to the UI."""
+suffixes, since the engine doesn't expose those concepts to the UI. If
+an `event_bus` is supplied, each entry also re-publishes a
+`MoveLoggedEvent` so other subscribers never need to poll `.entries`
+directly."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
-from kungfu_chess.ui.events.events import MoveResolvedEvent
+from kungfu_chess.ui.events.event_bus import EventBus
+from kungfu_chess.ui.events.events import MoveLoggedEvent, MoveResolvedEvent
 from kungfu_chess.ui.theme import DEFAULT_THEME
 
 _COL_LETTERS = DEFAULT_THEME.board.file_letters
@@ -46,15 +50,20 @@ class LoggedMove:
 
 
 class MoveLogObserver:
-    def __init__(self, clock_ms_source: Callable[[], int]):
+    def __init__(self, clock_ms_source: Callable[[], int],
+                 event_bus: Optional[EventBus] = None):
         self._clock_ms_source = clock_ms_source
+        self._event_bus = event_bus
         self.entries: Dict[str, List[LoggedMove]] = {"w": [], "b": []}
 
     def on_move_resolved(self, event: MoveResolvedEvent) -> None:
         text = _move_text(event.piece_kind, event.src_row, event.src_col,
                            event.dst_row, event.dst_col, event.captured_piece_kind)
-        self.entries[event.piece_color].append(
-            LoggedMove(self._clock_ms_source(), text))
+        time_ms = self._clock_ms_source()
+        self.entries[event.piece_color].append(LoggedMove(time_ms, text))
+        if self._event_bus is not None:
+            self._event_bus.publish(
+                MoveLoggedEvent(color=event.piece_color, text=text, time_ms=time_ms))
 
     def recent(self, color: str, n: int = 8) -> List[LoggedMove]:
         return self.entries[color][-n:]

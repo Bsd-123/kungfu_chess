@@ -1,31 +1,34 @@
 """Observer/pub-sub core. Pure UI-side -- only publishes/subscribes the
 plain-value events in `events.py`; `ui/composition.py` is the sole
-caller of `publish_*`."""
+caller of `publish`. Generic over event type: adding a new event type
+never requires modifying this class."""
 from __future__ import annotations
 
-from typing import Callable, List
+import logging
+from collections import defaultdict
+from typing import Callable, DefaultDict, List, Type, TypeVar
 
-from kungfu_chess.ui.events.events import JumpResolvedEvent, MoveResolvedEvent
+EventT = TypeVar("EventT")
+Handler = Callable[[EventT], None]
 
-MoveResolvedHandler = Callable[[MoveResolvedEvent], None]
-JumpResolvedHandler = Callable[[JumpResolvedEvent], None]
+_logger = logging.getLogger(__name__)
 
 
 class EventBus:
     def __init__(self) -> None:
-        self._move_subscribers: List[MoveResolvedHandler] = []
-        self._jump_subscribers: List[JumpResolvedHandler] = []
+        self._subscribers: DefaultDict[type, List[Handler]] = defaultdict(list)
 
-    def subscribe_move_resolved(self, handler: MoveResolvedHandler) -> None:
-        self._move_subscribers.append(handler)
+    def subscribe(self, event_type: Type[EventT], handler: Handler) -> None:
+        self._subscribers[event_type].append(handler)
 
-    def subscribe_jump_resolved(self, handler: JumpResolvedHandler) -> None:
-        self._jump_subscribers.append(handler)
-
-    def publish_move_resolved(self, event: MoveResolvedEvent) -> None:
-        for handler in self._move_subscribers:
-            handler(event)
-
-    def publish_jump_resolved(self, event: JumpResolvedEvent) -> None:
-        for handler in self._jump_subscribers:
-            handler(event)
+    def publish(self, event: EventT) -> None:
+        """Notifies every subscriber of `type(event)` in registration order.
+        A subscriber that raises is logged and skipped -- one broken
+        observer can't block the rest of the publish loop."""
+        for handler in self._subscribers[type(event)]:
+            try:
+                handler(event)
+            except Exception:
+                _logger.exception(
+                    "Event subscriber %r raised while handling %s",
+                    handler, type(event).__name__)

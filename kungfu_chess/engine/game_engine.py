@@ -15,6 +15,7 @@ from kungfu_chess.engine.movement_math import squares_traveled
 from kungfu_chess.engine.motion_gate import MotionGate
 from kungfu_chess.engine.legal_destinations import LegalDestinationsCalculator
 from kungfu_chess.engine.settlement_notifier import SettlementNotifier
+from kungfu_chess.engine.game_lifecycle_notifier import GameLifecycleNotifier
 from kungfu_chess.engine.snapshot_builder import SnapshotBuilder
 from kungfu_chess.realtime.collision_handler import CollisionHandler
 from kungfu_chess.realtime.motion import SettlementEvent
@@ -44,6 +45,7 @@ class GameEngine:
         self._legal_destinations = LegalDestinationsCalculator(
             self._state, self._rule_engine, self._motion_gate)
         self._settlement_notifier = SettlementNotifier()
+        self._game_lifecycle_notifier = GameLifecycleNotifier()
         self._snapshot_builder = SnapshotBuilder(self._state, self._config, self._collision_handler)
 
     # -- read-only facade surface used by commands -----------------
@@ -137,6 +139,12 @@ class GameEngine:
         produce a settlement."""
         self._settlement_notifier.add_listener(listener)
 
+    def add_game_ended_listener(self, listener: Callable[[Optional[str], int], None]) -> None:
+        """Registers `listener`, called exactly once with `(winner_color, clock_ms)`
+        at the moment `game_over` becomes True inside `_apply_win_condition`.
+        Primitive values only -- never a live `Piece`/`GameState` reference."""
+        self._game_lifecycle_notifier.add_listener(listener)
+
     # -- virtual-time advancement and atomic settlement --
     def advance_clock(self, ms: int) -> None:
         self._state.advance_clock(ms)
@@ -172,6 +180,7 @@ class GameEngine:
         if (event.captured_piece is not None
                 and self._win_condition.check(event.piece, event.captured_piece)):
             self._state.mark_game_over(event.piece.color)
+            self._game_lifecycle_notifier.notify_game_ended(event.piece.color, self._state.clock_ms)
 
     def render(self) -> str:
         return BoardTextView.render_board(self._state.board)

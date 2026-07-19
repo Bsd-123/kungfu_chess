@@ -174,3 +174,27 @@ def test_snapshot_returns_game_snapshot():
 def test_clock_ms_starts_zero():
     engine = make_engine()
     assert engine.clock_ms == 0
+
+
+def test_game_ended_listener_fires_exactly_once_on_win_never_on_ordinary_move():
+    rows = [['.'] * 8 for _ in range(8)]
+    rows[7][0] = 'wR'
+    rows[0][0] = 'bK'
+    rows[6][3] = 'wP'
+    config = GameConfig()
+    engine = make_engine(rows, config)
+    calls = []
+    engine.add_game_ended_listener(lambda winner, clock_ms: calls.append((winner, clock_ms)))
+
+    # Ordinary move (no capture) must not fire the listener.
+    engine.request_move(Position(6, 3), Position(5, 3))
+    engine.advance_clock(config.move_duration_for('P'))
+    assert calls == []
+
+    # Rook slides up the file to capture the king -- a real win condition.
+    engine.request_move(Position(7, 0), Position(0, 0))
+    duration = config.move_duration_for('R') * 7
+    engine.advance_clock(duration)
+    assert len(calls) == 1
+    assert calls[0][0] == 'w'
+    assert engine.game_over is True

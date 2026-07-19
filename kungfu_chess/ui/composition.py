@@ -31,9 +31,16 @@ from kungfu_chess.ui.rendering.panel_renderer import PanelRenderer
 from kungfu_chess.ui.rendering.toast_renderer import ToastRenderer
 from kungfu_chess.ui.rendering.board_view import BoardView
 from kungfu_chess.ui.events.event_bus import EventBus
-from kungfu_chess.ui.events.events import JumpResolvedEvent, MoveResolvedEvent
+from kungfu_chess.ui.events.events import (
+    GameEndedEvent,
+    GameStartedEvent,
+    JumpResolvedEvent,
+    MoveResolvedEvent,
+)
+from kungfu_chess.ui.events.observers.game_lifecycle_observer import GameLifecycleObserver
 from kungfu_chess.ui.events.observers.moves_log_observer import MoveLogObserver
 from kungfu_chess.ui.events.observers.score_observer import ScoreObserver
+from kungfu_chess.ui.events.observers.sound_observer import SoundObserver
 
 _UI_PACKAGE_DIR = os.path.dirname(__file__)
 ASSET_ROOT, _ASSET_IS_REAL = DEFAULT_ASSET_PATHS.resolve(_UI_PACKAGE_DIR)
@@ -58,22 +65,37 @@ def wire_event_observers(
     piece_renderer: Optional[PieceRenderer] = None,
     config: Optional[GameConfig] = None,
 ) -> Tuple[MoveLogObserver, ScoreObserver]:
-    """Bridges GameEngine's settlement listener into the UI's plain-value
-    events. If `piece_renderer` is given, it's subscribed too so it can
+    """Bridges GameEngine's settlement/lifecycle listeners into the UI's
+    plain-value events, and wires every cross-cutting side effect (score,
+    move log, sound, start/end animation triggers) through one `EventBus`
+    instance. If `piece_renderer` is given, it's subscribed too so it can
     animate a slide-back correction on truncated landings. `config`
-    supplies `ScoreObserver`'s piece values; omit to use its own default."""
+    supplies `ScoreObserver`'s piece values; omit to use its own default.
+    Returns `(move_log, score)` -- the two observers `game_loop.run_loop`
+    reads from each frame; `sound`/`lifecycle` are internal bus
+    subscribers with no external readers yet."""
     event_bus = EventBus()
-    move_log = MoveLogObserver(clock_ms_source=lambda: engine.clock_ms)
-    score = ScoreObserver(piece_values=config.piece_values if config is not None else None)
-    event_bus.subscribe_move_resolved(move_log.on_move_resolved)
-    event_bus.subscribe_move_resolved(score.on_move_resolved)
+    move_log = MoveLogObserver(clock_ms_source=lambda: engine.clock_ms, event_bus=event_bus)
+    score = ScoreObserver(piece_values=config.piece_values if config is not None else None,
+                           event_bus=event_bus)
+    sound = SoundObserver(event_bus)
+    lifecycle = GameLifecycleObserver()
+
+    event_bus.subscribe(MoveResolvedEvent, move_log.on_move_resolved)
+    event_bus.subscribe(MoveResolvedEvent, score.on_move_resolved)
+    event_bus.subscribe(JumpResolvedEvent, score.on_jump_resolved)
+    event_bus.subscribe(MoveResolvedEvent, sound.on_move_resolved)
+    event_bus.subscribe(JumpResolvedEvent, sound.on_jump_resolved)
+    event_bus.subscribe(GameStartedEvent, sound.on_game_started)
+    event_bus.subscribe(GameEndedEvent, sound.on_game_ended)
+    event_bus.subscribe(GameStartedEvent, lifecycle.on_game_started)
+    event_bus.subscribe(GameEndedEvent, lifecycle.on_game_ended)
     if piece_renderer is not None:
-        event_bus.subscribe_move_resolved(piece_renderer.on_move_resolved)
-    event_bus.subscribe_jump_resolved(score.on_jump_resolved)
+        event_bus.subscribe(MoveResolvedEvent, piece_renderer.on_move_resolved)
 
     def on_settlement(event: SettlementDataInterface) -> None:
         if event.move_type == 'jump':
-            event_bus.publish_jump_resolved(JumpResolvedEvent(
+            event_bus.publish(JumpResolvedEvent(
                 piece_color=event.piece_color,
                 piece_kind=event.piece_kind,
                 row=event.dst[0], col=event.dst[1],
@@ -81,7 +103,7 @@ def wire_event_observers(
             ))
             return
 
-        event_bus.publish_move_resolved(MoveResolvedEvent(
+        event_bus.publish(MoveResolvedEvent(
             piece_color=event.piece_color,
             piece_kind=event.piece_kind,
             src_row=event.src[0], src_col=event.src[1],
@@ -92,6 +114,11 @@ def wire_event_observers(
         ))
 
     engine.add_settlement_listener(on_settlement)
+    engine.add_game_ended_listener(
+        lambda winner, clock_ms: event_bus.publish(
+            GameEndedEvent(winner=winner, timestamp_ms=clock_ms)))
+
+    event_bus.publish(GameStartedEvent(timestamp_ms=engine.clock_ms))
     return move_log, score
 
 

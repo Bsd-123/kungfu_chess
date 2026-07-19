@@ -25,6 +25,13 @@ class GameConfig:
     jump_cooldown_ms: dict = field(default_factory=dict)
     default_jump_cooldown_ms: int = 400
 
+    # Standard chess relative piece values, keyed by piece type; used by
+    # ScoreObserver to score captures. King omitted from capture scoring
+    # since a king capture ends the game via win_condition_piece_types.
+    piece_values: dict = field(default_factory=lambda: {
+        'P': 1, 'N': 3, 'B': 3, 'R': 5, 'Q': 9, 'K': 0,
+    })
+
     empty_token: str = '.'
     board_marker: str = 'Board:'
     commands_marker: str = 'Commands:'

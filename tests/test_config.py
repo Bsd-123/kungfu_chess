@@ -83,3 +83,15 @@ def test_motion_state_constants():
     assert GameConfig.MOTION_STATE_IDLE == 'idle'
     assert GameConfig.MOTION_STATE_MOVE == 'move'
     assert GameConfig.MOTION_STATE_JUMP == 'jump'
+
+
+def test_piece_values_covers_every_token_pattern_piece_type():
+    config = GameConfig()
+    for piece_type in 'KQRBNP':
+        assert piece_type in config.piece_values
+
+
+def test_piece_values_independent_per_instance():
+    c1 = GameConfig()
+    c2 = GameConfig()
+    assert c1.piece_values is not c2.piece_values
