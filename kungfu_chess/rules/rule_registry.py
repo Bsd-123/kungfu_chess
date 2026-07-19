@@ -16,10 +16,7 @@ from kungfu_chess.model.piece import Piece
 
 
 class RuleRegistry:
-    """Maps a piece-type identifier to its MovementRule strategy. The
-    engine is agnostic to what piece types exist: callers configure the
-    registry (or build a custom one) and the engine simply asks it
-    whether a move is legal."""
+    """Maps a piece-type identifier to its MovementRule strategy."""
 
     def __init__(self, rules: Optional[Dict[str, MovementRule]] = None):
         self._rules: Dict[str, MovementRule] = dict(rules) if rules else {}
@@ -39,8 +36,7 @@ class RuleRegistry:
 
 
 def create_default_chess_registry() -> RuleRegistry:
-    """Factory producing the standard chess piece set. Custom games can
-    build their own registry from scratch instead."""
+    """Factory producing the standard chess piece set."""
     registry = RuleRegistry()
     registry.register('K', KingMovementRule())
     registry.register('Q', QueenMovementRule())

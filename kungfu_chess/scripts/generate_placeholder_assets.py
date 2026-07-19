@@ -1,31 +1,7 @@
-"""Placeholder art (final_plan_verified.md Phase 1 step 4, extended in
-Phase 4 for the sprite/state-machine layer, and refreshed to match a
-reference mockup with real chess-piece silhouettes). Built purely
-through `Img.new`/`draw_rect`/`draw_circle`/`draw_ellipse`/
-`draw_polygon`/`draw_line`/`put_text`/`save` -- no external art, no
-other drawing library, no PIL/Unicode font glyphs (cv2's Hershey fonts
-don't have chess symbols, so the pieces are hand-built silhouettes
-instead of rendered characters).
-
-Each state folder gets `frame_0.png`, `frame_1.png`, ... plus a
-`config.json` (`fps`, `loop`, `next_state_when_finished`) that
-`SpriteLibrary` reads. `board.png` is a *plain* checkerboard with no
-margin or coordinate labels baked in -- `BoardRenderer` draws those
-itself, uniformly, around whatever checkerboard image it's given
-(matters now that a real board asset can be dropped in too: it will
-never happen to be exactly `cell_pixel_size` px/square or carry this
-app's own label styling, so baking the margin into this generator's own
-output specifically would only work for this generator's own output).
-
-Swapping to real assets is a drop-a-folder-in operation, not a code
-change: `SpriteLibrary` auto-detects a `pieces_mine/` subfolder under
-its asset root and switches to that layout instead of this script's
-flat one (see `kungfu_chess/ui/sprites/sprite_library.py`). This script
-only ever writes under `.../sprites/assets/placeholder/`, never touches
-`.../assets/assets/` (the real-asset folder).
-
-Run directly: `python -m kungfu_chess.scripts.generate_placeholder_assets`
-"""
+"""Generates placeholder sprite/board art as hand-built silhouettes via Img draw calls (no PIL/external art,
+since cv2's Hershey fonts lack chess glyphs). Each state folder gets frame_N.png plus a config.json (fps, loop,
+next_state_when_finished) read by SpriteLibrary. Only writes under `.../sprites/assets/placeholder/`, never the
+real-asset folder. Run: `python -m kungfu_chess.scripts.generate_placeholder_assets`."""
 from __future__ import annotations
 
 import json
@@ -60,9 +36,7 @@ STATE_CONFIGS = {
 
 
 def generate_board(cell_pixel_size: int, ncols: int, nrows: int) -> str:
-    """Plain `ncols x nrows` checkerboard, no margin/labels -- see the
-    module docstring for why that's `BoardRenderer`'s job now, not
-    this generator's."""
+    """Plain checkerboard, no margin/labels -- those are drawn by BoardRenderer."""
     board_w = cell_pixel_size * ncols
     board_h = cell_pixel_size * nrows
 
@@ -92,6 +66,15 @@ def _pt(cx: float, cy: float, dx: float, dy: float, sx: float, sy: float) -> tup
     return (int(round(cx + dx * sx)), int(round(cy + dy * sy)))
 
 
+def _draw_base_plate(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float,
+                      half_width: float = 18, y1: float = 30, y2: float = 36) -> None:
+    """Base plate shared by all six `_draw_<kind>` functions; only half_width/y1/y2 vary."""
+    base = [_pt(cx, cy, -half_width, y1, sx, sy), _pt(cx, cy, half_width, y1, sx, sy),
+            _pt(cx, cy, half_width, y2, sx, sy), _pt(cx, cy, -half_width, y2, sx, sy)]
+    img.draw_polygon(base, (*fill, 255), thickness=-1)
+    img.draw_polygon(base, (*outline, 255), thickness=2)
+
+
 def _draw_pawn(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
     head_r = int(round(12 * min(sx, sy)))
     head_c = _pt(cx, cy, 0, -14, sx, sy)
@@ -101,10 +84,7 @@ def _draw_pawn(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: flo
     img.draw_circle(head_c[0], head_c[1], head_r, (*fill, 255), thickness=-1)
     img.draw_polygon(body, (*outline, 255), thickness=2)
     img.draw_circle(head_c[0], head_c[1], head_r, (*outline, 255), thickness=2)
-    base = [_pt(cx, cy, -18, 30, sx, sy), _pt(cx, cy, 18, 30, sx, sy),
-            _pt(cx, cy, 18, 36, sx, sy), _pt(cx, cy, -18, 36, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy)
 
 
 def _draw_rook(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
@@ -121,10 +101,7 @@ def _draw_rook(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: flo
                _pt(cx, cy, mx + 8, -13, sx, sy), _pt(cx, cy, mx, -13, sx, sy)]
         img.draw_polygon(mer, (*fill, 255), thickness=-1)
         img.draw_polygon(mer, (*outline, 255), thickness=2)
-    base = [_pt(cx, cy, -18, 30, sx, sy), _pt(cx, cy, 18, 30, sx, sy),
-            _pt(cx, cy, 18, 36, sx, sy), _pt(cx, cy, -18, 36, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy)
 
 
 def _draw_knight(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
@@ -141,10 +118,7 @@ def _draw_knight(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: f
     img.draw_polygon(head, (*outline, 255), thickness=2)
     eye = _pt(cx, cy, 3, -8, sx, sy)
     img.draw_circle(eye[0], eye[1], 2, (*outline, 255), thickness=-1)
-    base = [_pt(cx, cy, -18, 30, sx, sy), _pt(cx, cy, 18, 30, sx, sy),
-            _pt(cx, cy, 18, 36, sx, sy), _pt(cx, cy, -18, 36, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy)
 
 
 def _draw_bishop(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
@@ -159,10 +133,7 @@ def _draw_bishop(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: f
     slit_a = _pt(cx, cy, -7, -6, sx, sy)
     slit_b = _pt(cx, cy, 7, 6, sx, sy)
     img.draw_line(slit_a[0], slit_a[1], slit_b[0], slit_b[1], (*outline, 255), thickness=2)
-    base = [_pt(cx, cy, -18, 28, sx, sy), _pt(cx, cy, 18, 28, sx, sy),
-            _pt(cx, cy, 18, 34, sx, sy), _pt(cx, cy, -18, 34, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy, y1=28, y2=34)
 
 
 def _draw_queen(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
@@ -183,10 +154,7 @@ def _draw_queen(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: fl
         p = _pt(cx, cy, dx, dy, sx, sy)
         img.draw_circle(p[0], p[1], 3, (*fill, 255), thickness=-1)
         img.draw_circle(p[0], p[1], 3, (*outline, 255), thickness=1)
-    base = [_pt(cx, cy, -19, 30, sx, sy), _pt(cx, cy, 19, 30, sx, sy),
-            _pt(cx, cy, 19, 36, sx, sy), _pt(cx, cy, -19, 36, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy, half_width=19)
 
 
 def _draw_king(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: float) -> None:
@@ -204,10 +172,7 @@ def _draw_king(img: Img, fill, outline, cx: float, cy: float, sx: float, sy: flo
     h_right = _pt(cx, cy, 7, -20, sx, sy)
     img.draw_line(v_top[0], v_top[1], v_bot[0], v_bot[1], (*outline, 255), thickness=3)
     img.draw_line(h_left[0], h_left[1], h_right[0], h_right[1], (*outline, 255), thickness=3)
-    base = [_pt(cx, cy, -19, 30, sx, sy), _pt(cx, cy, 19, 30, sx, sy),
-            _pt(cx, cy, 19, 36, sx, sy), _pt(cx, cy, -19, 36, sx, sy)]
-    img.draw_polygon(base, (*fill, 255), thickness=-1)
-    img.draw_polygon(base, (*outline, 255), thickness=2)
+    _draw_base_plate(img, fill, outline, cx, cy, sx, sy, half_width=19)
 
 
 _SHAPE_DRAWERS = {
@@ -248,8 +213,7 @@ def jump_frames(color: str, kind: str, cell: int):
 
 
 def short_rest_frames(color: str, kind: str, cell: int):
-    # Brief post-jump settle before the longer long_rest cooldown --
-    # a lighter dim than long_rest so the two are visually distinct.
+    # Lighter dim than long_rest for visual distinction.
     return [_piece_sprite(kind, color, cell, 1.0, 1.0, alpha=230),
             _piece_sprite(kind, color, cell, 1.0, 1.0, alpha=210)]
 

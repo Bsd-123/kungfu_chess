@@ -1,4 +1,3 @@
-# Repository: https://github.com/your-org/your-repo (placeholder)
 from __future__ import annotations
 import sys
 from typing import Optional
@@ -12,6 +11,7 @@ from kungfu_chess.model.game_state import GameState
 from kungfu_chess.rules.promotion_rules import ConditionalPromotionRule, last_rank_trigger
 from kungfu_chess.rules.rule_engine import RuleEngine
 from kungfu_chess.rules.rule_registry import create_default_chess_registry
+from kungfu_chess.rules.win_condition import CapturedTypeWinCondition
 
 
 def build_game_engine(rows, config: GameConfig) -> GameEngine:
@@ -20,13 +20,16 @@ def build_game_engine(rows, config: GameConfig) -> GameEngine:
     rule_registry = create_default_chess_registry()
     promotion_rule = ConditionalPromotionRule(trigger=last_rank_trigger)
     rule_engine = RuleEngine(rule_registry, promotion_rule=promotion_rule)
-    return GameEngine(state, rule_engine, config)
+    # Win condition is driven by config (win_condition_piece_types,
+    # ('K',) by default) rather than hardcoded inside GameEngine.
+    win_condition = CapturedTypeWinCondition(config.win_condition_piece_types)
+    return GameEngine(state, rule_engine, config, win_condition=win_condition)
 
 
 def run(data: str, config: Optional["GameConfig"] = None) -> str:
     """Parse input text, run its commands, and return the textual output.
-    Kept separate from main() so it can be exercised directly in tests
-    without touching stdin/stdout."""
+    Kept separate from main() so it can be tested directly without
+    touching stdin/stdout."""
     config = config or GameConfig()
     parser = BoardParser(config)
 
@@ -39,17 +42,14 @@ def run(data: str, config: Optional["GameConfig"] = None) -> str:
     command_registry = create_default_command_registry(config)
     command_registry.run(engine, command_lines)
 
-    if engine.output_chunks:
-        return '\n'.join(engine.output_chunks) + '\n'
+    if not engine.output_chunks:
+        engine.output_chunks.append(engine.render())
 
-    engine.settle()
-    return engine.render() + '\n'
+    return "\n".join(engine.output_chunks) + "\n"
 
 
-def main():
+def main() -> None:
+    """Reads the full text format from stdin and writes the result to
+    stdout."""
     data = sys.stdin.read()
     sys.stdout.write(run(data))
-
-
-if __name__ == '__main__':  # pragma: no cover
-    main()

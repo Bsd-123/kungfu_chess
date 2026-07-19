@@ -1,9 +1,6 @@
-"""Observer/pub-sub core (plan section 7.1/7.6). Pure UI-side: no
-import of anything from `kungfu_chess.realtime`/`kungfu_chess.model` --
-only ever publishes/subscribes the plain-value events in `events.py`.
-`ui/app.py`'s composition root is the sole caller of `publish_*`, fed
-by a small bridge function that translates the engine's own
-`SettlementEvent` into these types."""
+"""Observer/pub-sub core. Pure UI-side -- only publishes/subscribes the
+plain-value events in `events.py`; `ui/composition.py` is the sole
+caller of `publish_*`."""
 from __future__ import annotations
 
 from typing import Callable, List

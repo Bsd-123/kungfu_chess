@@ -5,10 +5,12 @@ env/
 
 #
 final_plan_verified.md
-
+architectural_coupling_report.md
+kungfu_chess_collision_sync_integration.md
 # התעלמות מקבצי קונפיגורציה או קבצים זמניים של Python
 __pycache__/
 *.pyc
+pytest.ini
 
 # קבצי מערכת והגדרות אישיות של עורך הקוד
 .vscode/

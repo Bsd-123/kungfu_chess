@@ -16,9 +16,7 @@ class BoardError(Exception):
 
 
 class BoardParser:
-    """Parses the 'Board:' / 'Commands:' text format. Purely concerned
-    with turning raw text into rows of tokens and a list of command
-    lines -- no game logic lives here."""
+    """Parses the 'Board:' / 'Commands:' text format into rows of tokens and command lines."""
 
     def __init__(self, config: GameConfig):
         self._config = config
@@ -39,9 +37,7 @@ class BoardParser:
             raise BoardError("MISSING_BOARD")
 
         if commands_start is not None and commands_start < board_start:  # pragma: no cover
-            # Defensive guard: unreachable via the scan above (which stops
-            # at the first Commands marker), kept for robustness if the
-            # scan logic ever changes.
+            # Unreachable via the scan above; kept for robustness.
             raise BoardError("COMMANDS_BEFORE_BOARD")
 
         return board_start, commands_start
@@ -85,7 +81,7 @@ class BoardParser:
         return rows
 
     def parse(self, text: str) -> Tuple[List[List[str]], List[str]]:
-        """Convenience method: parse full input text into (rows, command_lines)."""
+        """Parse full input text into (rows, command_lines)."""
         lines = text.split('\n')
         board_start, commands_start = self.find_sections(lines)
         board_lines = self.extract_board_lines(lines, board_start, commands_start)

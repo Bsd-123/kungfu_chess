@@ -1,11 +1,6 @@
-"""State pattern (plan section 7.1/7.3): one `SpriteState` per named
-animation (`idle`/`move`/`jump`/`long_rest`), each owning its own frame
-list plus a small `StateConfig` (fps, loop flag, next-state-when-
-finished). `AnimatedSprite` holds exactly one `SpriteState` at a time
-and swaps it out via `SpriteLibrary` rather than branching on the state
-name itself -- new states (e.g. a future "capture flourish") only ever
-mean adding another asset folder + config, never touching this class.
-"""
+"""One `SpriteState` per named animation, each with its own frame list
+and `StateConfig` (fps, loop, next-state-when-finished). New states
+only need a new asset folder + config, no code changes here."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,10 +33,7 @@ class SpriteState:
         return min(index, len(self.frames) - 1)
 
     def advance(self, dt_ms: float) -> Optional[str]:
-        """Advances this state's own frame clock by `dt_ms`. Returns the
-        name of the next state to transition to if a *non-looping*
-        state just finished playing through all its frames this tick,
-        else None (still playing, or loops forever)."""
+        """Returns the next state name if a non-looping state just finished this tick, else None."""
         self._elapsed_ms += dt_ms
         if self.config.loop:
             return None

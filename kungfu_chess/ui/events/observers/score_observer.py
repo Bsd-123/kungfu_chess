@@ -1,31 +1,29 @@
-"""Phase 5 step 3 (final_plan_verified.md section 0.3/7.6): keyed on the
-engine's real single-character codes, never translated English words --
-the original draft's `PIECE_VALUES = {"pawn": 1, ...}` would always
-have returned 0 against `piece.kind == "P"`; this fixes that mismatch
-at the source instead of adding a translation layer."""
+"""Tracks per-color score from captures, keyed on single-character piece
+codes (`"P"`, etc.). Piece values are injected via the constructor,
+defaulting to `GameConfig.piece_values` (lazily imported)."""
 from __future__ import annotations
 
 from typing import Dict, Optional
 
 from kungfu_chess.ui.events.events import JumpResolvedEvent, MoveResolvedEvent
 
-PIECE_VALUES: Dict[str, int] = {"P": 1, "N": 3, "B": 3, "R": 5, "Q": 9}
-
 
 class ScoreObserver:
-    def __init__(self) -> None:
-        self.score = {"w": 0, "b": 0}  # keyed on piece.color's real values
+    def __init__(self, piece_values: Optional[Dict[str, int]] = None) -> None:
+        if piece_values is None:
+            # Lazy import avoids a hard UI -> engine-config coupling.
+            from kungfu_chess.config import GameConfig
+            piece_values = GameConfig().piece_values
+        self._piece_values = piece_values
+        self.score = {"w": 0, "b": 0}
 
     def on_move_resolved(self, event: MoveResolvedEvent) -> None:
         self._apply_capture(event.captured_piece_kind, event.piece_color)
 
     def on_jump_resolved(self, event: JumpResolvedEvent) -> None:
-        # Now live: a jump landing on an enemy piece (requirement 3)
-        # publishes a JumpResolvedEvent via ui/app.py's on_settlement
-        # bridge, same as a move capture does.
         self._apply_capture(event.captured_piece_kind, event.piece_color)
 
     def _apply_capture(self, captured_kind: Optional[str], capturing_color: str) -> None:
         if captured_kind is None:
             return
-        self.score[capturing_color] += PIECE_VALUES.get(captured_kind, 0)
+        self.score[capturing_color] += self._piece_values.get(captured_kind, 0)

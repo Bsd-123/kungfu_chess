@@ -5,13 +5,7 @@ from kungfu_chess.model.board import BoardInterface
 
 
 class BoardTextView:
-    """View Adapter / DTO layer (Phase 6): the single place responsible
-    for turning board data into the space-separated, newline-delimited
-    wire/display text format. Neither the Model (GameState) nor the
-    parser's own helpers format text themselves -- both hand off to this
-    class, so the on-the-wire text representation can change (e.g.
-    padding, a different delimiter, colorized output) without touching
-    model or parsing code."""
+    """Turns board data into the space-separated, newline-delimited wire/display text format."""
 
     @staticmethod
     def render_rows(rows: List[List[str]]) -> str:
@@ -22,7 +16,5 @@ class BoardTextView:
         return BoardTextView.render_rows(board.to_rows())
 
 
-# Spec §5/§13 names this component `BoardPrinter`. Kept as an alias
-# rather than a rename so nothing that already imports `BoardTextView`
-# (or its `render_rows`/`render_board` methods) has to change.
+# Alias: this component is also referred to as `BoardPrinter`.
 BoardPrinter = BoardTextView

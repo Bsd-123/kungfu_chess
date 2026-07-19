@@ -7,17 +7,8 @@ from kungfu_chess.engine.game_engine import GameEngine
 
 
 class Controller:
-    """Click interpretation layer (Spec §4/§11/§20). Owns pixel-to-cell
-    translation (via BoardMapper) and the selected-cell application
-    state. It does not decide chess legality -- it only turns a click
-    into an intent and forwards that intent to GameEngine, which is the
-    only thing allowed to consult RuleEngine/RealTimeArbiter.
-
-    Extracted out of the DSL command layer (`ClickCommand`) so it can be
-    exercised on its own (per §16: "Controller -- unit tests with a fake
-    GameEngine") without going through board-parsing / DSL plumbing at
-    all. `ClickCommand` now simply forwards to an instance of this class;
-    the click-handling *behavior* is unchanged, only *where it lives*."""
+    """Click interpretation layer: pixel-to-cell translation plus selected-cell state.
+    Does not decide legality, only forwards intents to GameEngine."""
 
     def __init__(self, engine: GameEngine, cell_pixel_size: int):
         self._engine = engine
@@ -32,9 +23,7 @@ class Controller:
         pos = self._mapper.pixel_to_cell(x, y)
 
         if not self._engine.board.is_within_bounds(pos):
-            # Outside-board click: ignored if nothing is selected;
-            # cancels the current selection (sending no command) if
-            # something is.
+            # Outside-board click cancels any current selection.
             self._selected = None
             return
 

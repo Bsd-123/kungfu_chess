@@ -12,21 +12,13 @@ from kungfu_chess.rules.rule_registry import RuleRegistry
 
 @dataclass(frozen=True)
 class MoveValidation:
-    """Result shape mandated by Spec §8. `reason` is always present:
-    `"ok"` for a legal move, otherwise a stable, machine-readable code
-    (`"outside_board"`, `"empty_source"`, `"friendly_destination"`,
-    `"illegal_piece_move"`). Kept as a tiny frozen dataclass rather than
-    a bare bool so callers (and tests) can branch on *why* a move was
-    rejected without re-deriving it themselves."""
+    """Result of a move-legality check. `reason` is `"ok"` or a stable code
+    (`"outside_board"`, `"empty_source"`, `"friendly_destination"`, `"illegal_piece_move"`)."""
 
     is_valid: bool
     reason: str
 
     def __bool__(self) -> bool:
-        # Non-breaking convenience: any existing/future call site that
-        # still does `if rule_engine.validate_move(...):` keeps working,
-        # since MoveValidation is now truthy/falsy exactly like the old
-        # plain bool was.
         return self.is_valid
 
 
@@ -34,15 +26,8 @@ _OK = MoveValidation(True, "ok")
 
 
 class RuleEngine:
-    """The Validation Layer (Rule 7): a specialized Validation Service
-    that answers, definitively, whether a piece may legally move from
-    src to dst -- including whether that arrival would trigger a
-    Promotion. It never performs the move and never mutates state; it
-    only judges.
-
-    It delegates piece-shape legality to the Strategy-pattern
-    RuleRegistry (Rule 6) and end-of-move transformation to a
-    PromotionRule, composing them without duplicating either's logic."""
+    """Answers whether a piece may legally move from src to dst; never mutates state.
+    Delegates shape legality to a RuleRegistry and promotion to a PromotionRule."""
 
     def __init__(self, rule_registry: RuleRegistry,
                  promotion_rule: Optional[PromotionRule] = None):
@@ -51,17 +36,9 @@ class RuleEngine:
 
     def validate_move(self, board: BoardInterface, piece: Optional[Piece],
                        src: Position, dst: Position) -> MoveValidation:
-        """Definitive legality answer for a requested move, as a
-        MoveValidation carrying a stable reason code (Spec §8). Bounds
-        are checked here, defense-in-depth, before any MovementRule ever
-        touches src/dst -- callers that reach the facade with an
-        out-of-bounds coordinate (from any path, not just the normal
-        PositionArgParser-validated one) get a clean rejection instead
-        of an IndexError surfacing from deep inside a shape check.
-
-        `piece` may be None (e.g. GameEngine looked up an empty source
-        cell); RuleEngine owns the "empty_source" verdict itself per
-        spec, rather than requiring callers to special-case it earlier."""
+        """Legality check; bounds are validated before any MovementRule runs to avoid
+        IndexErrors, and `piece=None` yields "empty_source" instead of requiring
+        callers to special-case it."""
         if not board.is_within_bounds(src) or not board.is_within_bounds(dst):
             return MoveValidation(False, "outside_board")
 
@@ -79,6 +56,5 @@ class RuleEngine:
 
     def resolve_arrival_piece(self, piece: Piece, dst: Position,
                                board: BoardInterface) -> Piece:
-        """What `piece` becomes once it settles at `dst` -- e.g. a
-        Promotion trigger firing -- or the same piece, unchanged."""
+        """What `piece` becomes once it settles at `dst` (e.g. promotion), or unchanged."""
         return self._promotion_rule.apply(piece, dst, board)

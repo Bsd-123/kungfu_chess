@@ -13,12 +13,7 @@ def _direction(a: int, b: int) -> int:
 
 
 class BoardInterface(ABC):
-    """Abstract board API. The rest of the engine only ever talks to a
-    board through this interface, so both the underlying storage
-    mechanism (text grid today, packed/binary representation tomorrow)
-    AND the piece representation it hands back (a `Piece` value object,
-    never a raw token string) can change without touching any calling
-    code."""
+    """Abstract board API; callers only ever see `Piece` objects, never raw tokens."""
 
     @property
     @abstractmethod
@@ -47,42 +42,17 @@ class BoardInterface(ABC):
         ...
 
     @abstractmethod
-    def path_clear(self, src: Position, dst: Position) -> bool:
-        """True if every square strictly between src and dst (in a
-        straight line, orthogonal or diagonal) is empty. Exposed as a
-        board capability -- rather than an external loop -- so that a
-        future compact/bitmask representation can answer this natively
-        and efficiently (e.g. via bitwise masks) instead of being forced
-        through a generic square-by-square walk."""
-
-    @abstractmethod
     def get_path(self, src: Position, dst: Position) -> List[Position]:
-        """Ordered list of squares from (but excluding) src to (and
-        including) dst, in travel order. For a straight orthogonal or
-        diagonal line this is every intermediate square plus the
-        destination; for any other displacement (a knight's L-shape)
-        there are no intermediate squares, so this degenerates to
-        `[dst]`. This is the single source of truth for "what squares
-        does a move pass through" -- the real-time Arbiter walks this
-        list at settlement time to resolve mid-path collisions (a
-        friendly piece in the way truncates the move there; an enemy
-        piece is captured there), so it lives next to `path_clear` as a
-        board-storage capability rather than being recomputed ad hoc by
-        callers."""
+        """Ordered squares from (excluding) src to (including) dst; non-sliding
+        moves (e.g. knight) degenerate to `[dst]`. Used to resolve mid-path collisions."""
 
     @abstractmethod
     def to_rows(self) -> List[List[str]]:
-        """Snapshot the board as rows of raw tokens, for rendering/export.
-        This is a serialization concern (text in, text out) and is the
-        one place tokens are allowed to surface -- engine/game logic
-        never calls this."""
+        """Snapshot as rows of raw tokens, for rendering/export only."""
 
 
 class ArrayBoard(BoardInterface):
-    """Simple 2D-list backed implementation of BoardInterface. Stores raw
-    tokens internally (since that's what the text format provides and
-    expects), but only ever exposes/accepts Piece objects at its public
-    get/set boundary -- token slicing lives entirely inside this class."""
+    """2D-list backed BoardInterface; stores raw tokens internally, exposes only Piece objects."""
 
     def __init__(self, rows: List[List[str]], empty_token: str = '.'):
         self._grid = [list(row) for row in rows]
@@ -101,11 +71,7 @@ class ArrayBoard(BoardInterface):
         return 0 <= r < self.nrows and 0 <= c < self.ncols
 
     def get_piece_at(self, pos: Position) -> Optional[Piece]:
-        # Engine-level bounds guard: any out-of-bounds query is treated
-        # as "nothing there" rather than raising IndexError, so callers
-        # elsewhere in the engine (which already validate bounds through
-        # PositionArgParser/RuleEngine) get a safe, predictable answer
-        # even if a bad coordinate slips through some other path.
+        # Out-of-bounds queries return None instead of raising IndexError.
         if not self.is_within_bounds(pos):
             return None
         r, c = pos
@@ -113,8 +79,7 @@ class ArrayBoard(BoardInterface):
         return None if token == self._empty_token else Piece.parse(token, cell=Position(r, c))
 
     def set_piece_at(self, pos: Position, piece: Optional[Piece]) -> None:
-        # Mirror image of the get_piece_at guard: writes to an
-        # out-of-bounds cell are safely dropped instead of throwing.
+        # Out-of-bounds writes are dropped instead of raising.
         if not self.is_within_bounds(pos):
             return
         r, c = pos
@@ -123,19 +88,6 @@ class ArrayBoard(BoardInterface):
     def is_empty_at(self, pos: Position) -> bool:
         return self.get_piece_at(pos) is None
 
-    def path_clear(self, src: Position, dst: Position) -> bool:
-        r1, c1 = src
-        r2, c2 = dst
-        dr = _direction(r1, r2)
-        dc = _direction(c1, c2)
-        r, c = r1 + dr, c1 + dc
-        while (r, c) != (r2, c2):
-            if not self.is_empty_at((r, c)):
-                return False
-            r += dr
-            c += dc
-        return True
-
     def get_path(self, src: Position, dst: Position) -> List[Position]:
         r1, c1 = src
         r2, c2 = dst
@@ -143,8 +95,7 @@ class ArrayBoard(BoardInterface):
         dc = _direction(c1, c2)
         is_straight_line = (r1 == r2) or (c1 == c2) or (abs(r2 - r1) == abs(c2 - c1))
         if not is_straight_line:
-            # Knight (or any other non-sliding displacement): no square
-            # is ever "passed through", the move either lands or doesn't.
+            # Non-sliding displacement: no intermediate square is passed through.
             return [Position(r2, c2)]
 
         path: List[Position] = []

@@ -9,31 +9,22 @@ from kungfu_chess.realtime.real_time_arbiter import RealTimeArbiter
 
 
 class GameState:
-    """Pure Model (Rule 3): board, arbiter (in-flight motions), selection,
-    clock and game-over flag only. GameState never validates a move,
-    never decides promotion, never decides when a Motion is due to
-    settle, and never formats text -- those are GameEngine/RuleEngine/
-    RealTimeArbiter/BoardTextView responsibilities respectively. This
-    keeps the Model completely decoupled from orchestration and
-    rendering, and forwards Piece objects only, never raw tokens."""
+    """Pure model: board, arbiter, selection, clock, game-over flag. No
+    validation/promotion/settlement/formatting logic lives here.
+    `game_over`/`winner_color` change only together via `mark_game_over`."""
 
     def __init__(self, board: BoardInterface, config: GameConfig,
                  arbiter: Optional[RealTimeArbiter] = None):
         self.board = board
         self.config = config
         self.selected: Optional[Position] = None
-        self.clock_ms = 0
+        self._clock_ms = 0
         self.arbiter = arbiter or RealTimeArbiter()
         self.output_chunks: List[str] = []
-        self.game_over = False
+        self._game_over = False
 
-        # Game-over-toast winner feature: which color's move actually
-        # ended the game (Rule 11's King-capture trigger) -- 'w'/'b', or
-        # None while the game is still in progress. Set once, alongside
-        # `game_over`, by GameEngine.settle(); read back out through the
-        # Spec §12 snapshot boundary so a renderer can show a winner's
-        # name without reaching into live engine state.
-        self.winner_color: Optional[str] = None
+        # 'w'/'b' whose move triggered the win, or None until game ends.
+        self._winner_color: Optional[str] = None
 
     @property
     def nrows(self) -> int:
@@ -43,38 +34,47 @@ class GameState:
     def ncols(self) -> int:
         return self.board.ncols
 
+    @property
+    def clock_ms(self) -> int:
+        return self._clock_ms
+
+    @property
+    def game_over(self) -> bool:
+        return self._game_over
+
+    @property
+    def winner_color(self) -> Optional[str]:
+        return self._winner_color
+
+    def advance_clock(self, ms: int) -> None:
+        self._clock_ms += ms
+
+    def mark_game_over(self, winner_color: Optional[str]) -> None:
+        """Sets `game_over` and `winner_color` together; only place either changes."""
+        self._game_over = True
+        self._winner_color = winner_color
+
     def is_piece_busy(self, src: Position) -> bool:
         return self.arbiter.is_piece_busy(src, self.clock_ms)
 
     def is_target_busy(self, dst: Position) -> bool:
-        """Rule 8 Step 2: is some other Motion already converging on
-        dst? Delegates entirely to the RealTimeArbiter -- GameState only
-        forwards the current clock reading."""
+        """Whether some other Motion is already converging on dst."""
         return self.arbiter.is_target_busy(dst, self.clock_ms)
 
     def is_active_airborne_at(self, cell: Position) -> bool:
         return self.arbiter.is_active_airborne_at(cell, self.clock_ms)
 
     def is_cooling_down(self, pos: Position) -> bool:
-        """Post-move cooldown feature: is `pos` still recovering from a
-        motion that settled there recently? Same delegate-to-Arbiter,
-        forward-the-clock shape as every other query here."""
         return self.arbiter.is_cooling_down(pos, self.clock_ms)
 
     def schedule_move(self, src: Position, dst: Position, piece: Piece,
                        duration_ms: int, cooldown_ms: int = 0) -> None:
-        self.arbiter.schedule_move(src, dst, piece, self.clock_ms, duration_ms,
-                                    self.board, cooldown_ms)
+        """Schedules a move Motion with the RealTimeArbiter."""
+        self.arbiter.schedule_move(src, dst, piece, self.clock_ms,
+                                    duration_ms, self.board, cooldown_ms)
 
-    def schedule_jump(self, src: Position, piece: Piece, duration_ms: int,
-                       cooldown_ms: int = 0) -> None:
-        # Deliberately does NOT clear the board cell: the piece must
-        # stay visible/renderable at its square for the whole hover (the
-        # snapshot layer only ever draws what board.get_piece_at
-        # returns). "Vacant for collision purposes while airborne"
-        # (requirement 3) is instead a property the Arbiter's path-walk
-        # asks for explicitly via `is_active_airborne_at`, layered on
-        # top of the literal board content -- see
-        # RealTimeArbiter._advance_through_path -- rather than something
-        # achieved by actually removing the piece from the board.
-        self.arbiter.schedule_jump(src, piece, self.clock_ms, duration_ms, cooldown_ms)
+    def schedule_jump(self, pos: Position, piece: Piece,
+                       duration_ms: int, cooldown_ms: int = 0) -> None:
+        """Schedules a jump Motion with the RealTimeArbiter."""
+        self.arbiter.schedule_jump(pos, piece, self.clock_ms,
+                                    duration_ms, cooldown_ms)

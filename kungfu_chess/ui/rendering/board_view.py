@@ -1,22 +1,14 @@
-"""`BoardView` -- thin coordinator, not a god object (plan section
-7.2a). Owns no drawing logic of its own; just sequences its
-collaborators. `overlay_renderer` is optional because it doesn't exist
-until Phase 3 -- passing `None` simply skips that step, so Phase 1 can
-use this exact class unchanged rather than a throwaway stand-in.
-`panel_renderer` (Phase 5) is the same story: optional fourth
-collaborator, skipped whenever either it or `panel_state` is None.
-`toast_renderer` (optional fifth collaborator) draws last, on top of
-everything else, and reads `game_over` straight off `snapshot` -- it
-needs no separate state argument the way overlay/panel do, since that
-flag is already part of the one thing every renderer is allowed to
-see."""
+"""`BoardView` sequences board/piece/overlay/panel/toast rendering.
+`overlay_renderer`/`panel_renderer` are optional (`None` skips that
+step; `panel_renderer` also needs `panel_state`); `toast_renderer`
+draws last, on top of everything."""
 from __future__ import annotations
 
 from typing import Optional
 
 from kungfu_chess.ui.img import Img
 from kungfu_chess.ui.rendering.board_renderer import BoardRenderer
-from kungfu_chess.ui.rendering.piece_renderer import PieceRenderer
+from kungfu_chess.ui.rendering.piece.renderer import PieceRenderer
 from kungfu_chess.view.game_snapshot import GameSnapshot
 
 
@@ -34,14 +26,8 @@ class BoardView:
 
     @property
     def piece_renderer(self) -> PieceRenderer:
-        """Read-only handle to the piece-compositing collaborator --
-        `BoardView` stays a thin coordinator (no new drawing logic here),
-        but the composition root (`ui/app.py`) needs a way to wire
-        `PieceRenderer` into the settlement-event pipeline (animation
-        snap-back feature) without reaching past `BoardView` into some
-        other construction path. Same rationale as returning
-        `move_log`/`score` from `wire_event_observers`: the composition
-        root needs handles to wire collaborators together."""
+        """Exposed so `ui/app.py` can wire `PieceRenderer` into the
+        settlement-event pipeline."""
         return self._pieces
 
     def render(self, snapshot: GameSnapshot, input_state=None, panel_state=None) -> Img:

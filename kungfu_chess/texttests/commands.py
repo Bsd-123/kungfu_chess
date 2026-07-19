@@ -10,10 +10,8 @@ from kungfu_chess.engine.game_engine import GameEngine
 
 
 class CommandError(Exception):
-    """Raised when a command's arguments are malformed (wrong count,
-    non-numeric, out of bounds, ...). Caught centrally by
-    CommandRegistry.run and turned into a standardized, testable
-    'ERROR <code>' output line instead of being silently swallowed."""
+    """Raised on malformed command arguments; caught centrally by CommandRegistry.run and turned into an
+    'ERROR <code>' output line."""
 
     def __init__(self, code: str):
         self.code = code
@@ -21,12 +19,8 @@ class CommandError(Exception):
 
 
 class PositionArgParser:
-    """Shared helper for commands that take '<x> <y>' pixel-coordinate
-    arguments. Extracted to avoid duplicating parsing logic (DRY).
-    Raises CommandError on any malformed input rather than returning a
-    sentinel, so callers can't accidentally ignore bad input. Coordinate
-    conversion itself is delegated to BoardMapper (Rule 4) -- this class
-    only owns argument parsing and bounds validation."""
+    """Shared helper for commands taking '<x> <y>' pixel-coordinate args; raises CommandError on malformed input
+    rather than returning a sentinel. Delegates coordinate conversion to BoardMapper."""
 
     def __init__(self, config: GameConfig):
         self._mapper = BoardMapper(config.cell_pixel_size)
@@ -46,9 +40,8 @@ class PositionArgParser:
 
     @staticmethod
     def parse_raw_ints(args: List[str]) -> Tuple[int, int]:
-        """Parses '<x> <y>' into raw ints without any bounds check.
-        Used by ClickCommand, which now delegates bounds/selection
-        handling to Controller (Spec §11) instead of doing it itself."""
+        """Parses '<x> <y>' into raw ints without any bounds check; used by ClickCommand, which delegates
+        bounds/selection handling to Controller."""
         if len(args) != 2:
             raise CommandError("INVALID_ARGS")
         try:
@@ -58,10 +51,8 @@ class PositionArgParser:
 
 
 class Command(ABC):
-    """Command pattern interface: every user command is one class with
-    a single responsibility. Commands only ever talk to the GameEngine
-    facade or the Controller (Rule 8) -- they never touch the RuleEngine,
-    the board, or the move scheduler directly."""
+    """Command pattern interface; commands only talk to the GameEngine facade or Controller, never the
+    RuleEngine, board, or move scheduler directly."""
 
     @abstractmethod
     def execute(self, engine: GameEngine, args: List[str]) -> None:
@@ -69,12 +60,8 @@ class Command(ABC):
 
 
 class ClickCommand(Command):
-    """Thin DSL adapter over Controller (Spec §11/§20). All click
-    interpretation -- selection, outside-board cancellation, jump-on-
-    same-cell, move-request-on-different-cell -- lives in Controller now;
-    this class only parses the two ints and keeps one Controller instance
-    per engine so selection state persists across a script's click
-    lines, exactly as it did when that state lived on GameEngine."""
+    """Thin DSL adapter over Controller; all click interpretation lives in Controller. Keeps one Controller
+    instance per engine so selection state persists across a script's click lines."""
 
     def __init__(self, config: GameConfig):
         self._config = config
@@ -110,10 +97,7 @@ class WaitCommand(Command):
         except ValueError:
             raise CommandError("INVALID_DURATION")
         if ms < 0:
-            # The virtual clock (Rule 9) is monotonic: a negative wait
-            # would run it backward, which would in turn make already
-            # in-flight Motions un-settle. Reject explicitly rather than
-            # silently clamping to 0, so bad input is visible.
+            # Rejected rather than clamped to 0: the virtual clock is monotonic and can't run backward.
             raise CommandError("INVALID_DURATION")
         engine.advance_clock(ms)
 
@@ -125,10 +109,8 @@ class PrintBoardCommand(Command):
 
 
 class CommandRegistry:
-    """Owns command-name -> Command dispatch and line-level parsing.
-    Nothing here knows about board storage or movement rules. Also owns
-    the single place malformed-command errors are caught and reported,
-    so individual commands never need their own error-output logic."""
+    """Owns command-name -> Command dispatch and line-level parsing; the single place malformed-command errors
+    are caught and reported."""
 
     def __init__(self, config: GameConfig):
         self._config = config

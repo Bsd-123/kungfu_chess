@@ -1,33 +1,20 @@
-"""Phase 5 step 2 (final_plan_verified.md): appends `(time, move_text)`
-per side on settle. Pure UI-side -- only ever touches `MoveResolvedEvent`
-(plain strings/ints), never an engine type.
-
-`clock_ms_source` is injected as a zero-arg callable rather than a
-stored `GameEngine` reference, so this observer stays decoupled from
-the engine object itself (plan section 7.7 DI/testability philosophy)
-and is trivially driven by a fake clock in headless tests.
-
-Task 17 rework, to match the reference mockup's two side panels (one
-move list per color, no color prefix needed since panel placement
-already implies it) and its `mm:ss.mmm` time column: `entries` is now
-split per color, and move text is "SAN-lite" -- close to real algebraic
-notation (`Nc6`, `Bxc6`, `e4`, `exd5`) without full disambiguation
-(never checks whether a second like piece could also reach the same
-square) or check/checkmate suffixes, since the engine doesn't expose
-either of those concepts to the UI layer at all."""
+"""Appends `(time, move_text)` per side on settle. `clock_ms_source` is a
+zero-arg callable (not a stored engine ref) so it's easily faked in
+tests. Move text is "SAN-lite" -- no disambiguation or check/mate
+suffixes, since the engine doesn't expose those concepts to the UI."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Dict, List
 
 from kungfu_chess.ui.events.events import MoveResolvedEvent
+from kungfu_chess.ui.theme import DEFAULT_THEME
 
-_COL_LETTERS = "abcdefgh"
+_COL_LETTERS = DEFAULT_THEME.board.file_letters
 
 
 def _square_name(row: int, col: int) -> str:
-    # row 0 = rank 8 (black's back rank), matching ui/setup.py's own
-    # row-ordering convention for the standard starting position.
+    # row 0 = rank 8, matching ui/setup.py's row convention.
     return f"{_COL_LETTERS[col]}{8 - row}"
 
 
@@ -35,9 +22,8 @@ def _move_text(kind: str, src_row: int, src_col: int,
                 dst_row: int, dst_col: int, captured_kind) -> str:
     dst = _square_name(dst_row, dst_col)
     if kind == "P":
-        # Real SAN only prefixes a pawn capture with its *source file*
-        # letter (e.g. "exd5"); a quiet pawn move is just the
-        # destination square ("e4"), no "P" prefix.
+        # Pawn captures prefix the source file (e.g. "exd5"); quiet
+        # moves are just the destination square.
         if captured_kind:
             return f"{_COL_LETTERS[src_col]}x{dst}"
         return dst
@@ -45,10 +31,8 @@ def _move_text(kind: str, src_row: int, src_col: int,
 
 
 def format_time_ms(time_ms: int) -> str:
-    """`mm:ss.mmm`, matching the reference mockup's Time column
-    (e.g. "00:04.105"). A plain module-level function (not a method)
-    so `PanelRenderer` can format a `LoggedMove.time_ms` without having
-    to hold a `MoveLogObserver` reference just to reach it."""
+    """`mm:ss.mmm` (e.g. "00:04.105"). Module-level so `PanelRenderer`
+    can format a `LoggedMove.time_ms` without a `MoveLogObserver` ref."""
     total_ms = max(0, int(time_ms))
     minutes, rest_ms = divmod(total_ms, 60_000)
     seconds, millis = divmod(rest_ms, 1000)

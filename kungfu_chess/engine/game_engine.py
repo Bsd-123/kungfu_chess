@@ -8,48 +8,43 @@ from kungfu_chess.io.board_printer import BoardTextView
 from kungfu_chess.config import GameConfig
 from kungfu_chess.model.game_state import GameState
 from kungfu_chess.rules.rule_engine import RuleEngine
+from kungfu_chess.rules.win_condition import WinConditionRule, king_capture_win_condition
 from kungfu_chess.engine.move_result import MoveResult
-from kungfu_chess.realtime.motion import PendingMove, SettlementEvent
-from kungfu_chess.view.game_snapshot import GameSnapshot, PieceSnapshot
-
-
-def _squares_traveled(src: Position, dst: Position) -> int:
-    """Chebyshev distance in cells: the number of discrete grid steps a
-    sliding/king-like move covers. Spec section 10: 'Moving N squares takes
-    N x 1000ms' -- N is this value. Using max(|dr|, |dc|) rather than
-    Manhattan distance is what makes a 3-square diagonal bishop move
-    come out to 3 (one step per diagonal cell), matching the spec's own
-    bishop example, rather than double-counting row+col."""
-    dr = abs(dst[0] - src[0])
-    dc = abs(dst[1] - src[1])
-    return max(dr, dc, 1)
+from kungfu_chess.engine.move_reasons import MoveReasons
+from kungfu_chess.engine.movement_math import squares_traveled
+from kungfu_chess.engine.motion_gate import MotionGate
+from kungfu_chess.engine.legal_destinations import LegalDestinationsCalculator
+from kungfu_chess.engine.settlement_notifier import SettlementNotifier
+from kungfu_chess.engine.snapshot_builder import SnapshotBuilder
+from kungfu_chess.realtime.collision_handler import CollisionHandler
+from kungfu_chess.realtime.motion import SettlementEvent
+from kungfu_chess.realtime.settlement_data import SettlementDataInterface
+from kungfu_chess.view.game_snapshot import GameSnapshot
 
 
 class GameEngine:
-    """Central Orchestration Layer (Rule 8): the single facade through
-    which every game action is requested. Callers (commands/Controller)
-    never talk to the RuleEngine, the board, or the RealTimeArbiter
-    directly -- they go through `request_move` / `request_jump` /
-    `advance_clock` / `settle` / `snapshot`.
+    """Facade for all game actions (request_move/request_jump/advance_clock/settle/snapshot);
+    callers never talk to the RuleEngine, board, or RealTimeArbiter directly.
 
-    Validation (RuleEngine) is strictly decoupled from action (Rule 5):
-    `request_move` only ever *asks* the RuleEngine whether a move is
-    legal, it never decides legality itself. Scheduling is likewise
-    decoupled from resolution: GameEngine hands motions to the
-    RealTimeArbiter and only reacts to the SettlementEvents it reports
-    back when a motion resolves.
+    Settlement is atomic -- a Motion is either not-yet-arrived (board unchanged) or fully
+    applied, never in-between. Whether a settled capture ends the game is delegated to an
+    injected `WinConditionRule` (defaults to king-capture)."""
 
-    Settlement is atomic (Rule 10): a Motion has no observable
-    in-between state. A pending move either hasn't arrived yet (the
-    board still shows the old state) or it has arrived and the board
-    is updated immediately -- there is no partial/intermediate render.
-    """
-
-    def __init__(self, state: GameState, rule_engine: RuleEngine, config: GameConfig):
+    def __init__(self, state: GameState, rule_engine: RuleEngine, config: GameConfig,
+                 win_condition: Optional[WinConditionRule] = None,
+                 collision_handler: Optional[CollisionHandler] = None):
         self._state = state
         self._rule_engine = rule_engine
         self._config = config
-        self._settlement_listeners: List[Callable[[SettlementEvent], None]] = []
+        self._win_condition = win_condition or king_capture_win_condition()
+        # Stateless; defaults to a plain instance.
+        self._collision_handler = collision_handler or CollisionHandler()
+
+        self._motion_gate = MotionGate(self._state)
+        self._legal_destinations = LegalDestinationsCalculator(
+            self._state, self._rule_engine, self._motion_gate)
+        self._settlement_notifier = SettlementNotifier()
+        self._snapshot_builder = SnapshotBuilder(self._state, self._config, self._collision_handler)
 
     # -- read-only facade surface used by commands -----------------
     @property
@@ -85,34 +80,17 @@ class GameEngine:
     def is_cooling_down(self, pos: Position) -> bool:
         return self._state.is_cooling_down(pos)
 
-    # -- Rule 8: request_move as the application-service entry point --
+    # -- request_move: application-service entry point --
     def request_move(self, source: Position, destination: Position) -> MoveResult:
-        """Sequential checks, in the exact order mandated by Rule 8/section 9:
-        1. Is the game already over?                  -> "game_over"
-        2. Is there already an active motion involving
-           this piece as its source (busy), OR another
-           motion already converging on this exact
-           destination cell (target-busy)?             -> "motion_in_progress"
-        3. Is this piece's square still cooling down
-           from a motion that settled here recently?   -> "cooldown"
-        4. Does the RuleEngine validate and approve
-           the move?                                   -> its own reason
-        5. If approved: schedule the Motion with the
-           RealTimeArbiter, with a duration computed
-           from squares traveled (Spec section 10) and a
-           post-move cooldown for its landing square
-           (post-move cooldown feature).                -> "ok"
-        Returns a MoveResult; `bool(result)` still works exactly like
-        the old plain-bool return for any caller that doesn't care about
-        the reason."""
-        if self._state.game_over:
-            return MoveResult(False, "game_over")
+        """Checks MotionGate eligibility, then whether `destination` is already targeted
+        by another motion, then RuleEngine validation; on success schedules the Motion.
+        `bool(result)` reflects acceptance."""
+        blocked = self._motion_gate.blocked_reason(source)
+        if blocked is not None:
+            return MoveResult(False, blocked)
 
-        if self._state.is_piece_busy(source) or self._state.is_target_busy(destination):
-            return MoveResult(False, "motion_in_progress")
-
-        if self._state.is_cooling_down(source):
-            return MoveResult(False, "cooldown")
+        if self._state.is_target_busy(destination):
+            return MoveResult(False, MoveReasons.MOTION_IN_PROGRESS)
 
         piece = self._state.board.get_piece_at(source)
 
@@ -122,265 +100,83 @@ class GameEngine:
             return MoveResult(False, validation.reason)
 
         duration = self._move_duration_ms(piece, source, destination)
-        cooldown = self._cooldown_ms_for(piece)
+        cooldown = self._config.cooldown_for(piece.type)
         self._state.schedule_move(source, destination, piece, duration, cooldown)
-        return MoveResult(True, "ok")
+        return MoveResult(True, MoveReasons.OK)
 
     def _move_duration_ms(self, piece, source: Position, destination: Position) -> int:
-        """duration = squares_traveled * per_square_ms (Spec section 10). The
-        per-square rate defaults to `default_move_duration_ms` (1000ms,
-        i.e. PIECE_SPEED = 1 cell/sec) and can still be overridden per
-        piece type via `move_duration_ms`, e.g. for a custom variant
-        where knights move faster per square than pawns."""
-        per_square = self._config.move_duration_ms.get(
-            piece.type, self._config.default_move_duration_ms)
-        return _squares_traveled(source, destination) * per_square
-
-    def _cooldown_ms_for(self, piece) -> int:
-        """Post-move cooldown feature: how long, in ms, `piece`'s landing
-        square should refuse a new motion once this one settles. Same
-        per-piece-type-override-with-a-default shape as
-        `_move_duration_ms` (`GameConfig.cooldown_ms` / `.
-        default_cooldown_ms`), computed once here rather than in the
-        Arbiter so the Arbiter never has to know a piece *type* exists
-        -- it just faithfully starts whatever cooldown length it's
-        handed at scheduling time, the same delegation already used for
-        `duration_ms`."""
-        return self._config.cooldown_ms.get(piece.type, self._config.default_cooldown_ms)
-
-    def _jump_cooldown_ms_for(self, piece) -> int:
-        """Post-jump cooldown: a jump's landing square recovers on its
-        own, shorter schedule (`GameConfig.jump_cooldown_ms` /
-        `.default_jump_cooldown_ms`, distinct from the move ones above)
-        -- deliberately not reusing `_cooldown_ms_for`, since a jump is
-        a much snappier action than a multi-square slide and shouldn't
-        make its own square wait just as long before it can act again."""
-        return self._config.jump_cooldown_ms.get(piece.type, self._config.default_jump_cooldown_ms)
+        """duration = squares_traveled * per-square ms, from `GameConfig.move_duration_for`
+        (defaults to `default_move_duration_ms`)."""
+        per_square = self._config.move_duration_for(piece.type)
+        return squares_traveled(source, destination) * per_square
 
     # -- movement-range highlight feature: read-only legality probe -----
     def legal_destinations(self, source: Position) -> List[Position]:
-        """Every square a click on `source` could actually send that
-        piece to right now: everywhere `request_move(source, dst)` would
-        currently be accepted, plus `source` itself if `request_jump`
-        would currently be accepted (Controller's click-the-same-square
-        gesture). Purely a query -- schedules nothing, mutates nothing --
-        so the UI can call it every single frame while a piece is
-        selected without any side effects, exactly like `is_piece_busy`/
-        `is_target_busy` above.
-
-        Deliberately re-derives legality the same way `request_move`
-        itself does (same busy/target-busy/RuleEngine gates) rather than
-        exposing some cheaper approximation, so the highlighted set can
-        never drift out of sync with what a click would actually do --
-        including the parts of collision handling that only make sense
-        board-wide (`is_target_busy`, current occupancy).
-
-        `validate_move` itself is deliberately shape-only now (design
-        decision #3: no upfront fail-fast rejection for a *requested*
-        move -- the real-time Arbiter resolves actual path blocking
-        dynamically at settlement instead). A yellow highlight is a
-        different promise than "the request won't be rejected", though
-        -- it's read by the player as "you can move here right now" -- so
-        it additionally has to reflect today's real occupancy along the
-        path. Without the extra check below, a queen with any piece
-        sitting in its way would light up every square along the full
-        ray/diagonal past that piece too, even ones the move would never
-        actually reach (it would truncate against a same-color block, or
-        capture and stop, long before getting there): exactly the
-        "marked legal but doesn't actually let me land there" mismatch
-        this closes. The post-move cooldown feature adds one more gate
-        here (mirroring `request_move`'s own new "cooldown" rejection
-        reason): a piece still cooling down shows no highlights at all,
-        same as a busy piece -- it can't actually move anywhere right
-        now either."""
-        piece = self._state.board.get_piece_at(source)
-        if (piece is None or self._state.game_over
-                or self._state.is_piece_busy(source)
-                or self._state.is_cooling_down(source)):
-            return []
-
-        board = self._state.board
-        destinations: List[Position] = []
-        for row in range(self._state.nrows):
-            for col in range(self._state.ncols):
-                dst = Position(row, col)
-                if dst == source or self._state.is_target_busy(dst):
-                    continue
-                validation = self._rule_engine.validate_move(board, piece, source, dst)
-                if not validation.is_valid:
-                    continue
-
-                # `get_path(...)[:-1]` is every square strictly between
-                # source and dst -- empty for a knight, which has no
-                # in-between squares at all. If any of those is occupied
-                # *right now* (by either color), this destination isn't
-                # actually reachable this instant, so it's left off the
-                # highlight list. Landing exactly on the first blocker is
-                # still shown when that blocker is an enemy piece (a
-                # real, reachable capture) -- `validate_move` already
-                # refused a friendly destination itself via
-                # `BaseMovementRule`, so nothing further is needed for
-                # that case here.
-                path = board.get_path(source, dst)
-                if any(not board.is_empty_at(sq) for sq in path[:-1]):
-                    continue
-
-                destinations.append(dst)
-
-        # request_jump's own gate is just game_over/busy -- both already
-        # checked above -- so a jump is always available here; it has no
-        # separate destination of its own, it's the piece's own square.
-        destinations.append(source)
-        return destinations
+        """Delegates to `LegalDestinationsCalculator`."""
+        return self._legal_destinations.compute(source)
 
     def request_jump(self, position: Position) -> bool:
-        """Jumps bypass RuleEngine validation (there is no destination
-        to validate against) and are exempt from the target-busy check
-        (an airborne piece isn't converging on a shared destination
-        square the way a move is) but still respect the game-over,
-        busy-piece, and (post-move cooldown feature) still-cooling-down
-        checks, mirroring the same ordering as request_move."""
-        if self._state.game_over:
-            return False
-
-        if self._state.is_piece_busy(position):
-            return False
-
-        if self._state.is_cooling_down(position):
+        """Jumps skip RuleEngine validation and the target-busy check, but still go
+        through the same `MotionGate` as `request_move`."""
+        if self._motion_gate.blocked_reason(position) is not None:
             return False
 
         piece = self._state.board.get_piece_at(position)
         if piece is None:
             return False
 
-        cooldown = self._jump_cooldown_ms_for(piece)
+        cooldown = self._config.jump_cooldown_for(piece.type)
         self._state.schedule_jump(position, piece, self._config.jump_duration_ms, cooldown)
         return True
 
-    # -- Phase 5 (final_plan_verified.md section 4A): optional observer
-    # hook. Small, additive, backward-compatible -- an engine with zero
-    # listeners registered behaves exactly as before this was added.
-    def add_settlement_listener(self, listener: Callable[[SettlementEvent], None]) -> None:
-        """Registers `listener` to be called once per SettlementEvent as
-        `settle()` resolves it -- this is how the UI layer (Phase 5's
-        EventBus/observers) learns "a capture just happened" without
-        GameEngine importing anything UI-side, and without exposing the
-        RealTimeArbiter itself. Ordering matches section 1's table:
-        only settled *moves* ever produce a SettlementEvent; jumps never
-        do (they land back on their own src square, so there's nothing
-        to settle)."""
-        self._settlement_listeners.append(listener)
+    # -- optional observer hook; backward-compatible with zero listeners --
+    def add_settlement_listener(self, listener: Callable[[SettlementDataInterface], None]) -> None:
+        """Registers `listener`, called once per settled motion during `settle()`.
+        Typed against `SettlementDataInterface` (read-only), not the internal
+        `SettlementEvent`. Jumps land back on their own source square, so they never
+        produce a settlement."""
+        self._settlement_notifier.add_listener(listener)
 
-    # -- Rule 9/10: virtual-time advancement and atomic settlement ----
+    # -- virtual-time advancement and atomic settlement --
     def advance_clock(self, ms: int) -> None:
-        self._state.clock_ms += ms
+        self._state.advance_clock(ms)
         self.settle()
 
     def settle(self) -> None:
-        """Ask the RealTimeArbiter to resolve every Motion whose travel
-        duration has elapsed, then apply the one piece of chess-specific
-        policy that lives at this layer: Rule 11's King-capture
-        game-over trigger. The Arbiter itself has no notion of what a
-        King is -- it only reports SettlementEvents; GameEngine is the
-        only place that turns a captured King into game_over."""
-        events = self._state.arbiter.resolve_due(
-            self._state.clock_ms, self._state.board, self._rule_engine)
+        """Resolves each due motion via `CollisionHandler`, then applies the injected
+        `WinConditionRule` -- GameEngine is the only place a settled capture is checked
+        for a win -- and notifies listeners before clearing expired arbiter state."""
+        board = self._state.board
+        due_motions = self._state.arbiter.next_due_motions(self._state.clock_ms)
+        pending_motions = self._state.arbiter.pending_moves
 
-        for event in events:
-            if event.captured_piece is not None and event.captured_piece.type == 'K':
-                self._state.game_over = True
-                # Game-over-toast winner feature: the side that just
-                # captured the King is the winner -- `event.piece` is
-                # whichever piece's motion produced this SettlementEvent,
-                # i.e. the capturing piece, not the captured King.
-                self._state.winner_color = event.piece.color
-            for listener in self._settlement_listeners:
-                listener(event)
+        for m in due_motions:
+            if m.move_type == GameConfig.MOTION_STATE_MOVE:
+                event = self._collision_handler.resolve_move(
+                    m, board, self._rule_engine, pending_motions)
+            else:
+                event = self._collision_handler.resolve_jump_landing(
+                    m, board, pending_motions)
+            if event is None:
+                continue
+
+            self._state.arbiter.start_cooldown_for(m, event.dst)
+            self._apply_win_condition(event)
+            self._settlement_notifier.notify(event)
+
+        self._state.arbiter.clear_expired(self._state.clock_ms)
+
+    def _apply_win_condition(self, event: SettlementEvent) -> None:
+        """`event.piece` is the capturing piece, not the captured one; set atomically via
+        `GameState.mark_game_over` so `game_over`/`winner_color` can't drift apart."""
+        if (event.captured_piece is not None
+                and self._win_condition.check(event.piece, event.captured_piece)):
+            self._state.mark_game_over(event.piece.color)
 
     def render(self) -> str:
         return BoardTextView.render_board(self._state.board)
 
-    # -- Phase 4 (final_plan_verified.md section 7.5): derive per-piece
-    # animation state from the arbiter's own pending-motions list, since
-    # `piece.state` itself is dead (ArrayBoard.get_piece_at reconstructs a
-    # fresh Piece via Piece.parse on every call, which never sets state) --
-    def _pending_motion_at(self, pos: Position) -> Optional[PendingMove]:
-        return next((m for m in self._state.arbiter.pending_moves if m.src == pos), None)
-
-    # -- Spec section 12/20: read-only snapshot for the rendering boundary ---
+    # -- read-only snapshot for the rendering boundary --
     def snapshot(self) -> GameSnapshot:
-        """Builds the read-only GameSnapshot DTO handed to a renderer.
-        Deliberately does not expose live Board/Piece objects (Spec section 12:
-        "live domain objects increase coupling and create opportunities
-        for accidental mutation from the view layer"). Only logical
-        (settled) positions are reflected here; a renderer that wants to
-        interpolate an in-flight motion does so using `motion_progress`/
-        `dst_pixel_x`/`dst_pixel_y` below, not by reaching past this DTO."""
-        board = self._state.board
-        cell = self._config.cell_pixel_size
-        pieces: List[PieceSnapshot] = []
-        for row in range(board.nrows):
-            for col in range(board.ncols):
-                piece = board.get_piece_at(Position(row, col))
-                if piece is None:
-                    continue
-
-                motion = self._pending_motion_at(Position(row, col))
-                if motion is None:
-                    state, progress = "idle", 1.0
-                    dst_x, dst_y = None, None
-                else:
-                    state = motion.move_type  # "move" or "jump"
-                    span = motion.complete_time - motion.start_time
-                    progress = 1.0 if span <= 0 else min(1.0, max(0.0,
-                        (self._state.clock_ms - motion.start_time) / span))
-                    if motion.move_type == "move" and motion.dst is not None:
-                        # Rendering-only live preview (Spec §12 -- still
-                        # just plain ints on this DTO, no live domain
-                        # object leaks): where this move would land
-                        # against the board's *current* occupancy right
-                        # now, not blindly the originally requested
-                        # square. Makes a sliding piece visually stop at
-                        # (or capture) whatever is actually in its path
-                        # as the animation reaches it, instead of always
-                        # gliding straight through to `motion.dst` and
-                        # only correcting after the fact at settlement --
-                        # see RealTimeArbiter.preview_landing_square.
-                        preview_square = self._state.arbiter.preview_landing_square(
-                            motion, board)
-                        dst_x = preview_square[1] * cell
-                        dst_y = preview_square[0] * cell
-                    else:
-                        dst_x, dst_y = None, None
-
-                # Post-move cooldown feature: purely additive to this
-                # DTO, same as everything else here -- `None` whenever
-                # this square isn't cooling down (the overwhelmingly
-                # common case, and always the case when
-                # `default_cooldown_ms`/the per-type override is 0), a
-                # 0.0->1.0 elapsed fraction otherwise, for the renderer's
-                # cooldown-wheel animation to draw from directly without
-                # a separate per-square query call.
-                cooldown_progress = self._state.arbiter.cooldown_progress(
-                    Position(row, col), self._state.clock_ms)
-
-                pieces.append(PieceSnapshot(
-                    kind=piece.kind,
-                    color=piece.color,
-                    pixel_x=col * cell,
-                    pixel_y=row * cell,
-                    state=state,
-                    motion_progress=progress,
-                    dst_pixel_x=dst_x,
-                    dst_pixel_y=dst_y,
-                    cooldown_progress=cooldown_progress,
-                ))
-
-        return GameSnapshot(
-            board_width=board.ncols,
-            board_height=board.nrows,
-            pieces=pieces,
-            selected=self._state.selected,
-            game_over=self._state.game_over,
-            winner=self._state.winner_color,
-        )
+        """Delegates to `SnapshotBuilder`."""
+        return self._snapshot_builder.build()
