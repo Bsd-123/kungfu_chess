@@ -133,6 +133,9 @@ class MoveScheduler:
         entry = self._cooldowns.get(pos)
         return entry is not None and entry[0] > clock_ms
 
+    def has_active_cooldown(self, clock_ms: int) -> bool:
+        return any(until_ms > clock_ms for until_ms, _ in self._cooldowns.values())
+
     def cooldown_progress(self, pos: Position, clock_ms: int) -> Optional[float]:
         """0.0 (just settled) -> 1.0 (finished) elapsed fraction, or None if pos isn't cooling down."""
         entry = self._cooldowns.get(pos)

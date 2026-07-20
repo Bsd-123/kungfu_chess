@@ -17,9 +17,9 @@ from typing import Callable, Optional, Tuple
 
 from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
+from kungfu_chess.engine.domain_event_wiring import wire_engine_domain_events
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.input.controller import Controller
-from kungfu_chess.realtime.settlement_data import SettlementDataInterface
 from kungfu_chess.ui.setup import standard_start_rows
 from kungfu_chess.ui.theme import DEFAULT_THEME, UITheme
 from kungfu_chess.ui.asset_paths import DEFAULT_ASSET_PATHS
@@ -93,30 +93,7 @@ def wire_event_observers(
     if piece_renderer is not None:
         event_bus.subscribe(MoveResolvedEvent, piece_renderer.on_move_resolved)
 
-    def on_settlement(event: SettlementDataInterface) -> None:
-        if event.move_type == 'jump':
-            event_bus.publish(JumpResolvedEvent(
-                piece_color=event.piece_color,
-                piece_kind=event.piece_kind,
-                row=event.dst[0], col=event.dst[1],
-                captured_piece_kind=event.captured_piece_kind,
-            ))
-            return
-
-        event_bus.publish(MoveResolvedEvent(
-            piece_color=event.piece_color,
-            piece_kind=event.piece_kind,
-            src_row=event.src[0], src_col=event.src[1],
-            dst_row=event.dst[0], dst_col=event.dst[1],
-            captured_piece_kind=event.captured_piece_kind,
-            requested_dst_row=event.requested_dst[0] if event.requested_dst else None,
-            requested_dst_col=event.requested_dst[1] if event.requested_dst else None,
-        ))
-
-    engine.add_settlement_listener(on_settlement)
-    engine.add_game_ended_listener(
-        lambda winner, clock_ms: event_bus.publish(
-            GameEndedEvent(winner=winner, timestamp_ms=clock_ms)))
+    wire_engine_domain_events(engine, event_bus)
 
     event_bus.publish(GameStartedEvent(timestamp_ms=engine.clock_ms))
     return move_log, score

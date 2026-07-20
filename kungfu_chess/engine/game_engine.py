@@ -82,6 +82,14 @@ class GameEngine:
     def is_cooling_down(self, pos: Position) -> bool:
         return self._state.is_cooling_down(pos)
 
+    def has_activity(self) -> bool:
+        """True while any piece anywhere on the board is mid-motion,
+        airborne, or cooling down. Used by the server tick loop (Phase 2)
+        to skip idle games -- a settled board with no pending motion or
+        cooldown does no per-interval work."""
+        arbiter = self._state.arbiter
+        return arbiter.has_pending_motions() or arbiter.has_active_cooldown(self._state.clock_ms)
+
     # -- request_move: application-service entry point --
     def request_move(self, source: Position, destination: Position) -> MoveResult:
         """Checks MotionGate eligibility, then whether `destination` is already targeted

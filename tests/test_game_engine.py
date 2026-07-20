@@ -176,6 +176,31 @@ def test_clock_ms_starts_zero():
     assert engine.clock_ms == 0
 
 
+def test_has_activity_false_on_settled_idle_board():
+    engine = make_engine()
+    assert engine.has_activity() is False
+
+
+def test_has_activity_true_while_motion_in_flight():
+    rows = [['.'] * 8 for _ in range(8)]
+    rows[6][0] = 'wP'
+    engine = make_engine(rows)
+    engine.request_move(Position(6, 0), Position(5, 0))
+    assert engine.has_activity() is True
+
+
+def test_has_activity_true_during_post_move_cooldown():
+    rows = [['.'] * 8 for _ in range(8)]
+    rows[6][0] = 'wP'
+    config = GameConfig(cooldown_ms={'P': 1000})
+    engine = make_engine(rows, config)
+    engine.request_move(Position(6, 0), Position(5, 0))
+    engine.advance_clock(config.move_duration_for('P'))
+    assert engine.has_activity() is True
+    engine.advance_clock(config.cooldown_for('P'))
+    assert engine.has_activity() is False
+
+
 def test_game_ended_listener_fires_exactly_once_on_win_never_on_ordinary_move():
     rows = [['.'] * 8 for _ in range(8)]
     rows[7][0] = 'wR'

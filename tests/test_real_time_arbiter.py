@@ -1,8 +1,10 @@
 import pytest
 
+from kungfu_chess.config import GameConfig
 from kungfu_chess.model.board import ArrayBoard
 from kungfu_chess.model.piece import Piece
 from kungfu_chess.model.position import Position
+from kungfu_chess.realtime.motion import PendingMove
 from kungfu_chess.realtime.real_time_arbiter import RealTimeArbiter
 
 
@@ -62,6 +64,25 @@ def test_pending_moves_property():
     assert arb.pending_moves == []
     arb.schedule_move(Position(0, 0), Position(0, 1), piece, clock_ms=0, duration_ms=100, board=board)
     assert len(arb.pending_moves) == 1
+
+
+def test_has_pending_motions_reflects_scheduled_moves():
+    arb = RealTimeArbiter()
+    board = board3()
+    piece = Piece(color='w', type='R')
+    assert arb.has_pending_motions() is False
+    arb.schedule_move(Position(0, 0), Position(0, 1), piece, clock_ms=0, duration_ms=100, board=board)
+    assert arb.has_pending_motions() is True
+
+
+def test_has_active_cooldown_delegates():
+    arb = RealTimeArbiter()
+    assert arb.has_active_cooldown(0) is False
+    m = PendingMove(move_type=GameConfig.MOTION_STATE_MOVE, complete_time=100,
+                     src=Position(0, 0), piece=Piece(color='w', type='R'), cooldown_ms=500)
+    arb.start_cooldown_for(m, Position(0, 1))
+    assert arb.has_active_cooldown(100) is True
+    assert arb.has_active_cooldown(600) is False
 
 
 def test_next_due_motions_and_clear_expired():

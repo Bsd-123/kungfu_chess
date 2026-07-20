@@ -156,3 +156,15 @@ def test_cooldown_progress_guards_nonpositive_duration():
     s = MoveScheduler()
     s.start_cooldown(Position(0, 0), until_ms=1000, duration_ms=0)
     assert s.cooldown_progress(Position(0, 0), 500) is None
+
+
+def test_has_active_cooldown_false_with_no_cooldowns():
+    s = MoveScheduler()
+    assert s.has_active_cooldown(0) is False
+
+
+def test_has_active_cooldown_true_while_any_position_cooling_down():
+    s = MoveScheduler()
+    s.start_cooldown(Position(0, 0), until_ms=1000, duration_ms=1000)
+    assert s.has_active_cooldown(500) is True
+    assert s.has_active_cooldown(1000) is False

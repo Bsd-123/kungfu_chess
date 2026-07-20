@@ -35,6 +35,12 @@ class RealTimeArbiter:
     def cooldown_progress(self, pos: Position, clock_ms: int) -> Optional[float]:
         return self._scheduler.cooldown_progress(pos, clock_ms)
 
+    def has_pending_motions(self) -> bool:
+        return bool(self._scheduler.pending_moves)
+
+    def has_active_cooldown(self, clock_ms: int) -> bool:
+        return self._scheduler.has_active_cooldown(clock_ms)
+
     def start_cooldown_for(self, m: PendingMove, landing_square: Position) -> None:
         """Blocks `landing_square` (not necessarily `m.dst`) from new motions for `m.cooldown_ms`; no-op if
         cooldown_ms is 0. Called by GameEngine.settle() once CollisionHandler reports the actual landing square."""
