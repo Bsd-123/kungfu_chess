@@ -1,11 +1,15 @@
 """UI composition root: the one place that constructs concrete renderer/
 collaborator classes and wires them together (Composition Root pattern).
 
-`build_session` boots the engine + controller. `build_board_view` builds
-all rendering collaborators, returning `BoardView` + `Layout`.
-`wire_event_observers` bridges the engine's `SettlementEvent`-based
-listener hook into the UI's plain-value events (`MoveResolvedEvent`/
-`JumpResolvedEvent`), so other UI modules never see engine/model types.
+`build_session` boots a local engine + controller; `build_remote_session`
+is its networked counterpart (Phase 2), connecting to a
+`KungFuChessServer` and returning a `RemoteGameProxy` that `Controller`
+drives exactly as it would a local `GameEngine`. `build_board_view`
+builds all rendering collaborators, returning `BoardView` + `Layout`.
+`wire_event_observers`/`wire_remote_event_observers` bridge either
+source's settlement/lifecycle events into the UI's plain-value events
+(`MoveResolvedEvent`/`JumpResolvedEvent`/...), so other UI modules never
+see engine/model/network-transport types.
 
 `ASSET_ROOT`: real piece art wins over the placeholder pack when present,
 resolved once via `AssetPaths.resolve()`."""
@@ -20,6 +24,10 @@ from kungfu_chess.config import GameConfig
 from kungfu_chess.engine.domain_event_wiring import wire_engine_domain_events
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.input.controller import Controller
+from kungfu_chess.network.network_client import NetworkClient
+from kungfu_chess.network.remote_game_proxy import RemoteGameProxy
+from kungfu_chess.server.config import NetworkConfig
+from kungfu_chess.server.snapshot_codec import snapshot_from_dict
 from kungfu_chess.ui.setup import standard_start_rows
 from kungfu_chess.ui.theme import DEFAULT_THEME, UITheme
 from kungfu_chess.ui.asset_paths import DEFAULT_ASSET_PATHS
@@ -60,22 +68,18 @@ def build_session(config: GameConfig = None) -> Tuple[GameEngine, Controller]:
     return engine, controller
 
 
-def wire_event_observers(
-    engine: GameEngine,
-    piece_renderer: Optional[PieceRenderer] = None,
-    config: Optional[GameConfig] = None,
+def _subscribe_cross_cutting_observers(
+    event_bus: EventBus,
+    clock_ms_source: Callable[[], int],
+    piece_renderer: Optional[PieceRenderer],
+    config: Optional[GameConfig],
 ) -> Tuple[MoveLogObserver, ScoreObserver]:
-    """Bridges GameEngine's settlement/lifecycle listeners into the UI's
-    plain-value events, and wires every cross-cutting side effect (score,
-    move log, sound, start/end animation triggers) through one `EventBus`
-    instance. If `piece_renderer` is given, it's subscribed too so it can
-    animate a slide-back correction on truncated landings. `config`
-    supplies `ScoreObserver`'s piece values; omit to use its own default.
-    Returns `(move_log, score)` -- the two observers `game_loop.run_loop`
-    reads from each frame; `sound`/`lifecycle` are internal bus
-    subscribers with no external readers yet."""
-    event_bus = EventBus()
-    move_log = MoveLogObserver(clock_ms_source=lambda: engine.clock_ms, event_bus=event_bus)
+    """The subscription wiring shared by local and networked sessions
+    alike (score, move log, sound, start/end animation triggers) --
+    identical regardless of where domain events originate, so both
+    `wire_event_observers` and `wire_remote_event_observers` call this
+    rather than duplicating the subscribe calls (DRY)."""
+    move_log = MoveLogObserver(clock_ms_source=clock_ms_source, event_bus=event_bus)
     score = ScoreObserver(piece_values=config.piece_values if config is not None else None,
                            event_bus=event_bus)
     sound = SoundObserver(event_bus)
@@ -93,10 +97,85 @@ def wire_event_observers(
     if piece_renderer is not None:
         event_bus.subscribe(MoveResolvedEvent, piece_renderer.on_move_resolved)
 
+    return move_log, score
+
+
+def wire_event_observers(
+    engine: GameEngine,
+    piece_renderer: Optional[PieceRenderer] = None,
+    config: Optional[GameConfig] = None,
+) -> Tuple[MoveLogObserver, ScoreObserver]:
+    """Bridges GameEngine's settlement/lifecycle listeners into the UI's
+    plain-value events, and wires every cross-cutting side effect (score,
+    move log, sound, start/end animation triggers) through one `EventBus`
+    instance. If `piece_renderer` is given, it's subscribed too so it can
+    animate a slide-back correction on truncated landings. `config`
+    supplies `ScoreObserver`'s piece values; omit to use its own default.
+    Returns `(move_log, score)` -- the two observers `game_loop.run_loop`
+    reads from each frame; `sound`/`lifecycle` are internal bus
+    subscribers with no external readers yet."""
+    event_bus = EventBus()
+    move_log, score = _subscribe_cross_cutting_observers(
+        event_bus, lambda: engine.clock_ms, piece_renderer, config)
+
     wire_engine_domain_events(engine, event_bus)
 
     event_bus.publish(GameStartedEvent(timestamp_ms=engine.clock_ms))
     return move_log, score
+
+
+def build_remote_session(
+    url: str,
+    config: Optional[GameConfig] = None,
+    network_config: Optional[NetworkConfig] = None,
+    connect_timeout: float = 5.0,
+) -> Tuple[RemoteGameProxy, Controller, NetworkClient]:
+    """Networked counterpart to `build_session` (Phase 2): connects to a
+    `KungFuChessServer` at `url` and blocks until the initial snapshot
+    arrives. Returns `(proxy, controller, network_client)` --
+    `Controller` drives `proxy` exactly as it would a local `GameEngine`
+    (Strict Encapsulation); the caller is responsible for calling
+    `network_client.close()` when done."""
+    config = config or GameConfig()
+    client = NetworkClient(url, network_config)
+    client.connect(timeout=connect_timeout)
+    snapshot_envelope = _wait_for_snapshot(client, connect_timeout)
+    proxy = RemoteGameProxy(client, snapshot_from_dict(snapshot_envelope.payload))
+    controller = Controller(proxy, config.cell_pixel_size)
+    return proxy, controller, client
+
+
+def _wait_for_snapshot(client: NetworkClient, timeout: float):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for envelope in client.poll_incoming():
+            if envelope.type == "snapshot":
+                return envelope
+        time.sleep(0.01)
+    raise TimeoutError(f"no snapshot received within {timeout}s")
+
+
+def wire_remote_event_observers(
+    proxy: RemoteGameProxy,
+    piece_renderer: Optional[PieceRenderer] = None,
+    config: Optional[GameConfig] = None,
+) -> Tuple[MoveLogObserver, ScoreObserver, EventBus]:
+    """Networked counterpart to `wire_event_observers`: subscribes the
+    same score/move-log/sound/lifecycle observers, but domain events
+    originate from the server over the wire, not a local engine's
+    settlement listener -- the caller's per-frame loop drains them via
+    `network.network_sync.drain_network_client`. Also subscribes
+    `proxy.board`'s mirror so Controller's board queries stay in sync.
+    Returns `event_bus` too (unlike the local version), since the
+    caller needs it to pass to `drain_network_client` each frame."""
+    event_bus = EventBus()
+    move_log, score = _subscribe_cross_cutting_observers(
+        event_bus, lambda: proxy.clock_ms, piece_renderer, config)
+
+    event_bus.subscribe(MoveResolvedEvent, proxy.board.on_move_resolved)
+    event_bus.subscribe(JumpResolvedEvent, proxy.board.on_jump_resolved)
+
+    return move_log, score, event_bus
 
 
 def build_board_view(config: GameConfig = None,

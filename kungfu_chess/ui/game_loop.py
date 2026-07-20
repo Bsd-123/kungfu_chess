@@ -8,7 +8,10 @@ from typing import Callable, Optional, Tuple
 
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.input.controller import Controller
+from kungfu_chess.network.network_client import NetworkClient
+from kungfu_chess.network.network_sync import drain_network_client
 from kungfu_chess.ui.composition import DEFAULT_PLAYER_NAMES
+from kungfu_chess.ui.events.event_bus import EventBus
 from kungfu_chess.ui.events.observers.moves_log_observer import MoveLogObserver
 from kungfu_chess.ui.events.observers.score_observer import ScoreObserver
 from kungfu_chess.ui.input.mouse_router import MouseRouter
@@ -24,11 +27,18 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
              move_log: Optional[MoveLogObserver] = None,
              score: Optional[ScoreObserver] = None,
              player_names: Tuple[str, str] = DEFAULT_PLAYER_NAMES,
-             clock: Callable[[], float] = time.perf_counter) -> None:
+             clock: Callable[[], float] = time.perf_counter,
+             network_client: Optional[NetworkClient] = None,
+             event_bus: Optional[EventBus] = None) -> None:
     """Real-time loop: advance engine clock by elapsed wall time (settling
     due motions synchronously), build `InputState`/`PanelState`, render,
     display, poll for quit. `move_log`/`score` are optional; omitting
-    them skips the side panel."""
+    them skips the side panel. `network_client`/`event_bus` are Phase 2's
+    networked-mode hook: when both are given, incoming server envelopes
+    are drained and re-published onto `event_bus` once per frame before
+    rendering (`engine` is then a `RemoteGameProxy`, whose
+    `advance_clock` is a no-op -- the server is the authoritative
+    clock); omitting them keeps local, single-process play unchanged."""
     mouse_router = MouseRouter(controller, board_offset=layout.piece_offset,
                                 board_size=(layout.board_w, layout.board_h))
     renderer.register_mouse_handler(mouse_router.on_mouse_event)
@@ -40,6 +50,9 @@ def run_loop(engine: GameEngine, controller: Controller, board_view: BoardView,
             now = clock()
             dt_ms = max(0, int((now - last) * 1000))
             last = now
+
+            if network_client is not None and event_bus is not None:
+                drain_network_client(network_client, engine, event_bus)
 
             engine.advance_clock(dt_ms)
             selected = controller.selected

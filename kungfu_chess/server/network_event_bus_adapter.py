@@ -13,35 +13,17 @@ from dataclasses import asdict
 
 from kungfu_chess.server.protocol import make_envelope
 from kungfu_chess.server.session.game_session import GameSession
-from kungfu_chess.ui.events.events import (
-    GameEndedEvent,
-    GameStartedEvent,
-    JumpResolvedEvent,
-    MoveLoggedEvent,
-    MoveResolvedEvent,
-    ScoreUpdatedEvent,
-    SoundTriggeredEvent,
-)
+from kungfu_chess.ui.events.wire_names import DOMAIN_EVENT_WIRE_NAMES
 
-# Wire message `type` for each per-game domain event that reaches connected
-# clients. Deliberately not including a "snapshot was sent" entry -- that's
-# not modeled as a bus event on either bus (see Snapshot Synchronization
+# Deliberately not relaying a "snapshot was sent" entry -- that's not
+# modeled as a bus event on either bus (see Snapshot Synchronization
 # Strategy); GameSession.broadcast_snapshot sends it directly.
-_EVENT_TYPE_NAMES = {
-    MoveResolvedEvent: "move_resolved",
-    JumpResolvedEvent: "jump_resolved",
-    GameStartedEvent: "game_started",
-    GameEndedEvent: "game_ended",
-    ScoreUpdatedEvent: "score_updated",
-    MoveLoggedEvent: "move_logged",
-    SoundTriggeredEvent: "sound_triggered",
-}
 
 
 class NetworkEventBusAdapter:
     def __init__(self, session: GameSession) -> None:
         self._session = session
-        for event_type, type_name in _EVENT_TYPE_NAMES.items():
+        for event_type, type_name in DOMAIN_EVENT_WIRE_NAMES.items():
             self._session.event_bus.subscribe(event_type, self._make_relay(type_name))
 
     def _make_relay(self, type_name: str):
