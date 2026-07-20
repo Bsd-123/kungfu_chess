@@ -6,7 +6,9 @@ from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
 from kungfu_chess.model.position import Position
 from kungfu_chess.server.config import NetworkConfig
-from kungfu_chess.server.session.game_session import GameSession, PlayerRole, SessionFullError
+from kungfu_chess.server.session.game_session import (
+    GameSession, PlayerRole, SessionFullError, SpectatorCapError,
+)
 from kungfu_chess.server.session.session_reasons import SessionReasons
 from kungfu_chess.ui.events.event_bus import EventBus
 
@@ -19,7 +21,7 @@ class FakeConnection:
         return f"FakeConnection({self.name})"
 
 
-def make_session(rows=None, network_config=None, sent=None):
+def make_session(rows=None, network_config=None, sent=None, spectator_cap=20):
     rows = rows or [['.'] * 8 for _ in range(8)]
     engine = build_game_engine(rows, GameConfig())
 
@@ -30,7 +32,7 @@ def make_session(rows=None, network_config=None, sent=None):
     return GameSession(
         game_id="abc123", engine=engine, event_bus=EventBus(),
         network_config=network_config or NetworkConfig(),
-        send_to_connection=send_to_connection,
+        send_to_connection=send_to_connection, spectator_cap=spectator_cap,
     )
 
 
@@ -95,6 +97,68 @@ def test_connections_lists_only_occupied_slots():
     conn_a = FakeConnection('a')
     session.add_player(conn_a)
     assert session.connections == [conn_a]
+
+
+def test_add_spectator_appends_to_the_spectator_list():
+    session = make_session()
+    spectator = FakeConnection('spectator')
+    session.add_spectator(spectator)
+    assert session.is_spectator(spectator) is True
+    assert session.spectators == [spectator]
+
+
+def test_add_spectator_beyond_the_cap_raises():
+    session = make_session(spectator_cap=2)
+    session.add_spectator(FakeConnection('s1'))
+    session.add_spectator(FakeConnection('s2'))
+    with pytest.raises(SpectatorCapError):
+        session.add_spectator(FakeConnection('s3'))
+
+
+def test_remove_spectator_frees_the_slot():
+    session = make_session()
+    spectator = FakeConnection('spectator')
+    session.add_spectator(spectator)
+    session.remove_spectator(spectator)
+    assert session.is_spectator(spectator) is False
+    assert session.spectators == []
+
+
+def test_remove_spectator_for_a_non_spectator_is_a_noop():
+    session = make_session()
+    session.remove_spectator(FakeConnection('stranger'))  # should not raise
+
+
+def test_connections_excludes_spectators_but_all_connections_includes_them():
+    session = make_session()
+    player, spectator = FakeConnection('player'), FakeConnection('spectator')
+    session.add_player(player)
+    session.add_spectator(spectator)
+    assert session.connections == [player]
+    assert set(session.all_connections) == {player, spectator}
+
+
+def test_spectator_move_command_is_rejected_as_not_a_player():
+    rows = [['.'] * 8 for _ in range(8)]
+    rows[6][0] = 'wP'
+    session = make_session(rows)
+    session.add_player(FakeConnection('white'))
+    spectator = FakeConnection('spectator')
+    session.add_spectator(spectator)
+    result = session.handle_move_command(spectator, Position(6, 0), Position(5, 0))
+    assert bool(result) is False
+    assert result.reason == SessionReasons.NOT_A_PLAYER
+
+
+async def test_broadcast_reaches_spectators_too():
+    sent = []
+    session = make_session(sent=sent)
+    player, spectator = FakeConnection('player'), FakeConnection('spectator')
+    session.add_player(player)
+    session.add_spectator(spectator)
+    await session.broadcast_snapshot()
+    recipients = {c for c, _ in sent}
+    assert recipients == {player, spectator}
 
 
 def test_move_command_rejected_for_non_player_connection():

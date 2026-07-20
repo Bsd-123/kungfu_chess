@@ -65,9 +65,21 @@ class MatchmakingConfig:
 
 
 @dataclass(frozen=True)
+class RoomConfig:
+    # Decision 8: 4-6 character alphanumeric codes. A fixed length
+    # within that range keeps generation simple without losing anything
+    # the decision requires.
+    room_code_length: int = 5
+
+    # Decision 9: the 21st spectator join attempt is rejected outright.
+    spectator_cap: int = 20
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     game: GameConfig = field(default_factory=GameConfig)
     authentication: AuthenticationConfig = field(default_factory=AuthenticationConfig)
     rating: RatingConfig = field(default_factory=RatingConfig)
     matchmaking: MatchmakingConfig = field(default_factory=MatchmakingConfig)
+    room: RoomConfig = field(default_factory=RoomConfig)

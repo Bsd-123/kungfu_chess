@@ -45,18 +45,32 @@ class SessionFullError(Exception):
         self.game_id = game_id
 
 
+class SpectatorCapError(Exception):
+    """Raised when a connection tries to join as a spectator once this
+    GameSession already holds `spectator_cap` of them (Decision 9's
+    21st-spectator rejection). Room-specific admission policy (Phase 5)
+    still lives in `room_manager.py` -- this is the structural guard for
+    GameSession's own spectator list, mirroring `SessionFullError`."""
+
+    def __init__(self, game_id: str, cap: int):
+        super().__init__(f"GameSession {game_id!r} already has {cap} spectators")
+        self.game_id = game_id
+
+
 class GameSession:
     def __init__(self, game_id: str, engine: GameEngine, event_bus: EventBus,
                  network_config: NetworkConfig, send_to_connection: SendToConnection,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, spectator_cap: int = 20):
         self.game_id = game_id
         self.engine = engine
         self.event_bus = event_bus
         self.network_config = network_config
         self._send_to_connection = send_to_connection
         self._clock = clock
+        self._spectator_cap = spectator_cap
         self.white_connection: Optional[object] = None
         self.black_connection: Optional[object] = None
+        self.spectators: List[object] = []
 
         # Account identity per color (Phase 3's session tokens resolve to
         # a user_id one layer up, in the connection handshake). Persists
@@ -113,7 +127,33 @@ class GameSession:
 
     @property
     def connections(self) -> List[object]:
+        """Players only -- deliberately excludes spectators. Both the
+        Phase 2 disconnect-cleanup check and Phase 5's room teardown
+        (Decision 9: destroyed the moment both *players* have left,
+        regardless of how many spectators remain) key off this list."""
         return [c for c in (self.white_connection, self.black_connection) if c is not None]
+
+    # -- spectator admission (structural only; Room-specific policy,
+    # like the room-full "explicit message" wording, lives in
+    # room_manager.py -- see SpectatorCapError) --------------------------
+    def add_spectator(self, connection: object) -> None:
+        if len(self.spectators) >= self._spectator_cap:
+            raise SpectatorCapError(self.game_id, self._spectator_cap)
+        self.spectators.append(connection)
+
+    def remove_spectator(self, connection: object) -> None:
+        if connection in self.spectators:
+            self.spectators.remove(connection)
+
+    def is_spectator(self, connection: object) -> bool:
+        return connection in self.spectators
+
+    @property
+    def all_connections(self) -> List[object]:
+        """Players + spectators -- the actual broadcast target for
+        snapshots and relayed domain events (spectators watch the same
+        stream as players, read-only)."""
+        return self.connections + self.spectators
 
     # -- command handling: membership AND color-authorization, both
     # checked server-side (never trust the client to only send its own
@@ -147,7 +187,7 @@ class GameSession:
         await self._send_to_connection(connection, envelope)
 
     async def broadcast(self, envelope: Envelope) -> None:
-        for connection in self.connections:
+        for connection in self.all_connections:
             await self._send_to_connection(connection, envelope)
 
     # -- snapshot transmission (Snapshot Synchronization Strategy) -------
