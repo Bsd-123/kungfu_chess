@@ -16,3 +16,11 @@ pytest.ini
 .vscode/
 .idea/
 .DS_Store
+master_work_plan.md
+git switch -c your-new-branch-name
+
+# Phase 3: local SQLite auth database (users/sessions) and its WAL files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

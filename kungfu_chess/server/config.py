@@ -31,6 +31,31 @@ class NetworkConfig:
 
 
 @dataclass(frozen=True)
+class AuthenticationConfig:
+    # hashlib.pbkdf2_hmac('sha256', ...) rounds (Decision 3); read from
+    # config so the cost factor can be tuned without touching call sites.
+    pbkdf2_iterations: int = 210_000
+
+    # Sliding session-token expiry: a token not seen for this long is
+    # treated as gone (Phase 3 risk: "sessions table doesn't grow
+    # unbounded"). Reconnection (Decision 7) resets this on every use.
+    session_token_lifetime_s: int = 7 * 24 * 3600
+
+    db_path: str = "kungfu_chess.db"
+
+
+@dataclass(frozen=True)
+class RatingConfig:
+    # Seed rating for a brand-new account (Decision 10's `users.rating`
+    # default). Phase 4 extends this dataclass with k_factor and the
+    # matchmaking ELO band -- kept minimal here since only base_rating
+    # is needed until matchmaking exists.
+    base_rating: int = 1200
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     game: GameConfig = field(default_factory=GameConfig)
+    authentication: AuthenticationConfig = field(default_factory=AuthenticationConfig)
+    rating: RatingConfig = field(default_factory=RatingConfig)
