@@ -8,6 +8,7 @@ application" from a retried/double-fired event) -- applied at most once
 per session."""
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from kungfu_chess.server.auth.credentials_store import SqliteUserRepository
@@ -59,8 +60,16 @@ class RatingUpdateService:
             black.rating, expected_score(black.rating, white.rating),
             black_actual, self._rating_config.k_factor))
 
-        self._users.update_rating(white.id, new_white)
-        self._users.update_rating(black.id, new_black)
+        # _on_game_ended is an EventBus subscriber -- called synchronously,
+        # so it cannot itself await. The write is a single-row local
+        # SQLite UPDATE (sub-millisecond, WAL mode), but per
+        # master_work_plan.md's guidance ("offload SQLite writes via
+        # asyncio.to_thread so a slow disk write can't stall other
+        # games' ticks") it's still fired off the event loop rather than
+        # inline; nothing downstream needs the write to have landed
+        # before this handler returns.
+        asyncio.ensure_future(asyncio.to_thread(self._users.update_rating, white.id, new_white))
+        asyncio.ensure_future(asyncio.to_thread(self._users.update_rating, black.id, new_black))
 
         if self._message_bus is not None:
             self._message_bus.publish(RatingUpdatedEvent(white.id, white.rating, new_white))

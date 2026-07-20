@@ -90,6 +90,7 @@ class GameSession:
         self.rating_applied: bool = False
 
         self._tick_task: Optional[asyncio.Task] = None
+        self._stopped: bool = False
 
         # Decision 7: a disconnected player's 20-second reconnect grace
         # timer, keyed by role and stored here rather than in a separate
@@ -258,8 +259,24 @@ class GameSession:
 
     def stop(self) -> None:
         if self._tick_task is not None:
-            self._tick_task.cancel()
-            self._tick_task = None
+            if self._tick_task is asyncio.current_task():
+                # stop() was called synchronously from within the tick
+                # loop's own call stack -- e.g. a real win-condition's
+                # GameEndedEvent firing during advance_clock(), handled
+                # by a subscriber that reacts by stopping the session.
+                # Cancelling a task from inside itself doesn't abort
+                # immediately; the CancelledError lands at the *next*
+                # await, which would be this very iteration's
+                # broadcast_snapshot() -- truncating delivery of the
+                # game-ending move to whichever connections hadn't been
+                # sent to yet. So: don't cancel here. Just flag it;
+                # _tick_loop finishes this iteration's broadcast
+                # normally, then exits on its own.
+                self._stopped = True
+                self._tick_task = None
+            else:
+                self._tick_task.cancel()
+                self._tick_task = None
         # A torn-down session must never let a stray forfeit fire later.
         for role in list(self._disconnect_tasks):
             self.cancel_disconnect(role)
@@ -268,11 +285,14 @@ class GameSession:
         """Mirrors `ui/game_loop.py::run_loop`'s shape (advance clock,
         settle, broadcast) but only does either while the engine reports
         activity -- a settled, idle board does no per-interval work."""
+        self._stopped = False
         last = self._clock()
         interval_s = self.network_config.tick_interval_ms / 1000
         try:
-            while True:
+            while not self._stopped:
                 await asyncio.sleep(interval_s)
+                if self._stopped:
+                    break
                 now = self._clock()
                 dt_ms = max(0, int((now - last) * 1000))
                 last = now

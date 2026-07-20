@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from kungfu_chess.app import build_game_engine
@@ -79,26 +81,32 @@ async def test_reconnects_to_the_pending_disconnect_slot():
     assert session.has_pending_disconnect(PlayerRole.WHITE) is False
 
 
-async def test_reconnect_sends_a_snapshot_and_broadcasts_reconnected():
+async def test_reconnect_sends_a_snapshot_and_broadcasts_reconnected_to_the_opponent_only():
     sent = []
     manager, users = make_session_manager()
     token = manager.login("alice", "hunter2")
     alice = users.get_by_username("alice")
     session = make_session(sent=sent)
     old_connection = object()
+    black_connection = object()
     session.add_player(old_connection, user_id=alice.id)
+    session.add_player(black_connection, user_id=999)
     session.remove_player(old_connection)
     session.mark_disconnected(PlayerRole.WHITE, grace_period_ms=20_000, on_expire=lambda: None)
 
     handler = ReconnectHandler(manager, list_active_sessions=lambda: [session])
     new_connection = object()
     await handler.attempt_reconnect(token, new_connection)
+    await asyncio.sleep(0.02)  # let the scheduled snapshot/broadcast land
 
     snapshot_messages = [(c, e) for c, e in sent if e.type == "snapshot" and c is new_connection]
-    reconnected_messages = [e for c, e in sent if e.type == "reconnected"]
+    reconnected_messages = [(c, e) for c, e in sent if e.type == "reconnected"]
     assert len(snapshot_messages) == 1
+    # Only the opponent is told -- the reconnecting client already knows
+    # via its own auth_response, so it must not get a redundant copy.
     assert len(reconnected_messages) == 1
-    assert reconnected_messages[0].payload == {"role": "white"}
+    assert reconnected_messages[0][0] is black_connection
+    assert reconnected_messages[0][1].payload == {"role": "white"}
 
 
 async def test_publishes_reconnected_event_when_a_message_bus_is_given():
@@ -117,6 +125,7 @@ async def test_publishes_reconnected_event_when_a_message_bus_is_given():
     handler = ReconnectHandler(manager, list_active_sessions=lambda: [session], message_bus=bus)
 
     await handler.attempt_reconnect(token, object())
+    await asyncio.sleep(0.02)  # let the scheduled broadcast/publish land
 
     assert len(received) == 1
     assert received[0].user_id == alice.id

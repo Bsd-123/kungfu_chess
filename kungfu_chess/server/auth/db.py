@@ -29,8 +29,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 def open_connection(db_path: str) -> sqlite3.Connection:
     """Opens (creating if absent) the auth database and ensures both
     tables exist -- the "thin migration/bootstrap script" the plan
-    calls for, small enough to not warrant a separate migration tool."""
-    conn = sqlite3.connect(db_path)
+    calls for, small enough to not warrant a separate migration tool.
+
+    `check_same_thread=False`: repository calls are offloaded via
+    `asyncio.to_thread` (server/app.py), which runs them on a thread
+    pool worker, not the connection's creating thread. SQLite's own
+    library is compiled thread-safe (serialized mode) in the builds
+    Python ships, so sharing one connection across threads is safe for
+    this server's access pattern (single-statement reads/writes, no
+    cross-thread read-modify-write races); WAL mode above already
+    handles the concurrent-readers-plus-one-writer case."""
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)

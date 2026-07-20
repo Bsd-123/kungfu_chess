@@ -4,6 +4,7 @@ import pytest
 
 from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
+from kungfu_chess.engine.domain_event_wiring import wire_engine_domain_events
 from kungfu_chess.model.position import Position
 from kungfu_chess.server.config import NetworkConfig
 from kungfu_chess.server.session.game_session import (
@@ -11,6 +12,7 @@ from kungfu_chess.server.session.game_session import (
 )
 from kungfu_chess.server.session.session_reasons import SessionReasons
 from kungfu_chess.ui.events.event_bus import EventBus
+from kungfu_chess.ui.events.events import MoveResolvedEvent
 
 
 class FakeConnection:
@@ -334,3 +336,68 @@ async def test_stop_cancels_any_pending_disconnect_timer():
 
     assert fired == []
     assert session.has_pending_disconnect(PlayerRole.WHITE) is False
+
+
+async def test_stop_called_synchronously_from_within_the_tick_loop_does_not_truncate_the_broadcast():
+    """Regression test: a domain-event subscriber that reacts to a
+    settled move by calling session.stop() runs *inside* the tick
+    loop's own call stack (advance_clock -> settlement listener ->
+    event_bus.publish -> this subscriber). Self-cancelling the
+    currently-running tick task there would defer a CancelledError to
+    the very next await -- the in-flight broadcast_snapshot() -- and
+    could truncate delivery to whichever connections hadn't been sent
+    to yet. stop() must special-case this so the broadcast still
+    reaches every connection before the loop exits."""
+    rows = [['.'] * 8 for _ in range(8)]
+    rows[6][0] = 'wP'
+    # Fast enough that the move actually settles (fires MoveResolvedEvent)
+    # within the fake-time window advanced below -- the default 2500ms
+    # duration would leave the move still in flight the whole time,
+    # never triggering the subscriber this test depends on.
+    game_config = GameConfig(move_duration_ms={'P': 10}, default_move_duration_ms=10)
+    network_config = NetworkConfig(tick_interval_ms=5)
+    fake_time = [0.0]
+    sent = []
+
+    async def send_to_connection(connection, envelope):
+        # A real yield point (unlike the module-level make_session's
+        # fake, which never suspends and so never gives asyncio a
+        # chance to deliver a pending cancellation) -- needed to
+        # actually reproduce the truncated-broadcast hazard this test
+        # guards against.
+        await asyncio.sleep(0)
+        sent.append((connection, envelope))
+
+    engine = build_game_engine(rows, game_config)
+    session = GameSession(game_id="abc123", engine=engine, event_bus=EventBus(),
+                           network_config=network_config, send_to_connection=send_to_connection)
+    session._clock = lambda: fake_time[0]
+    wire_engine_domain_events(session.engine, session.event_bus)
+    conn_a, conn_b = FakeConnection('a'), FakeConnection('b')
+    session.add_player(conn_a)
+    session.add_player(conn_b)
+
+    # A connection appearing anywhere in `sent` isn't enough to prove
+    # the *final* broadcast wasn't truncated -- both connections already
+    # appear in earlier, unaffected ticks either way. Mark exactly where
+    # in `sent` the settlement fires, so the assertion below can inspect
+    # only what should have been appended afterward.
+    marker_index = []
+
+    def on_move_resolved(event):
+        marker_index.append(len(sent))
+        session.stop()
+
+    session.event_bus.subscribe(MoveResolvedEvent, on_move_resolved)
+
+    session.engine.request_move(Position(6, 0), Position(5, 0))
+    session.start()
+    for _ in range(20):
+        fake_time[0] += network_config.tick_interval_ms / 1000
+        await asyncio.sleep(0.01)
+
+    assert len(marker_index) == 1
+    final_broadcast = sent[marker_index[0]:]
+    final_recipients = {c for c, e in final_broadcast if e.type == "snapshot"}
+    assert final_recipients == {conn_a, conn_b}, (
+        f"the broadcast for the tick that ended the game was truncated: {final_broadcast!r}")

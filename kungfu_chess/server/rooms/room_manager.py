@@ -49,6 +49,12 @@ class RoomManager:
     def get_room(self, room_id: str) -> Optional[GameSession]:
         return self._rooms.get(room_id)
 
+    def list_sessions(self):
+        """All currently active rooms' GameSessions -- used by
+        ReconnectHandler to scan Room games alongside Play games for a
+        pending disconnect matching a reconnecting user."""
+        return list(self._rooms.values())
+
     def join_room(self, room_id: str, connection: object,
                    user_id: Optional[int] = None) -> Optional[PlayerRole]:
         """Second joiner becomes Black; every joiner after that is a

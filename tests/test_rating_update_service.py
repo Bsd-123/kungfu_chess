@@ -3,8 +3,19 @@ a real GameSession + real per-game EventBus + a real SqliteUserRepository,
 wired together with no network involved -- proves RatingUpdateService
 reacts correctly to a genuine GameEndedEvent regardless of which flow
 (matchmaking, or a Room) constructed the GameSession, since this
-service only ever looks at the session it was wired to."""
+service only ever looks at the session it was wired to.
+
+The actual rating writes are fired via asyncio.ensure_future(asyncio.
+to_thread(...)) (offloaded off the event loop, per master_work_plan.md's
+SQLite guidance) rather than applied inline, so publishing a
+GameEndedEvent with a real winner requires a running event loop, and
+asserting the persisted rating requires a brief await for the
+background write to land."""
 from __future__ import annotations
+
+import asyncio
+
+import pytest
 
 from kungfu_chess.app import build_game_engine
 from kungfu_chess.config import GameConfig
@@ -17,6 +28,8 @@ from kungfu_chess.server.rating.rating_update_service import RatingUpdateService
 from kungfu_chess.server.session.game_session import GameSession
 from kungfu_chess.ui.events.event_bus import EventBus
 from kungfu_chess.ui.events.events import GameEndedEvent
+
+pytestmark = pytest.mark.asyncio
 
 _AUTH_CONFIG = AuthenticationConfig(pbkdf2_iterations=1000)
 
@@ -39,7 +52,7 @@ def make_session(white_user_id, black_user_id):
     return session
 
 
-def test_white_win_updates_both_ratings_per_elo_formula():
+async def test_white_win_updates_both_ratings_per_elo_formula():
     repo = make_repository()
     white = repo.create_user("alice", "hunter2")
     black = repo.create_user("bob", "hunter2")
@@ -47,12 +60,13 @@ def test_white_win_updates_both_ratings_per_elo_formula():
     RatingUpdateService(repo, RatingConfig(k_factor=32)).wire(session)
 
     session.event_bus.publish(GameEndedEvent(winner='w', timestamp_ms=1000))
+    await asyncio.sleep(0.05)  # let the fire-and-forget to_thread writes land
 
     assert repo.get_by_id(white.id).rating == 1216
     assert repo.get_by_id(black.id).rating == 1184
 
 
-def test_black_win_updates_both_ratings_per_elo_formula():
+async def test_black_win_updates_both_ratings_per_elo_formula():
     repo = make_repository()
     white = repo.create_user("alice", "hunter2")
     black = repo.create_user("bob", "hunter2")
@@ -60,12 +74,13 @@ def test_black_win_updates_both_ratings_per_elo_formula():
     RatingUpdateService(repo, RatingConfig(k_factor=32)).wire(session)
 
     session.event_bus.publish(GameEndedEvent(winner='b', timestamp_ms=1000))
+    await asyncio.sleep(0.05)
 
     assert repo.get_by_id(white.id).rating == 1184
     assert repo.get_by_id(black.id).rating == 1216
 
 
-def test_rating_is_applied_at_most_once_for_a_duplicated_event():
+async def test_rating_is_applied_at_most_once_for_a_duplicated_event():
     repo = make_repository()
     white = repo.create_user("alice", "hunter2")
     black = repo.create_user("bob", "hunter2")
@@ -74,24 +89,25 @@ def test_rating_is_applied_at_most_once_for_a_duplicated_event():
 
     session.event_bus.publish(GameEndedEvent(winner='w', timestamp_ms=1000))
     session.event_bus.publish(GameEndedEvent(winner='w', timestamp_ms=1001))  # retried/duplicate
+    await asyncio.sleep(0.05)
 
     assert repo.get_by_id(white.id).rating == 1216
     assert repo.get_by_id(black.id).rating == 1184
     assert session.rating_applied is True
 
 
-def test_session_without_identified_players_is_left_unrated():
+async def test_session_without_identified_players_is_left_unrated():
     repo = make_repository()
     session = make_session(white_user_id=None, black_user_id=None)
     RatingUpdateService(repo, RatingConfig(k_factor=32)).wire(session)
 
-    # Should not raise despite there being no users to look up.
+    # Returns before ever scheduling a write -- no event loop required.
     session.event_bus.publish(GameEndedEvent(winner='w', timestamp_ms=1000))
 
     assert session.rating_applied is False
 
 
-def test_rating_update_service_does_not_care_who_created_the_session():
+async def test_rating_update_service_does_not_care_who_created_the_session():
     """RatingUpdateService only ever inspects the GameSession it's wired
     to -- there is nothing matchmaking-specific about it, so a Room-
     constructed session (built the same way, just not via QueueManager)
@@ -103,12 +119,13 @@ def test_rating_update_service_does_not_care_who_created_the_session():
     RatingUpdateService(repo, RatingConfig(k_factor=32)).wire(room_session)
 
     room_session.event_bus.publish(GameEndedEvent(winner='b', timestamp_ms=1000))
+    await asyncio.sleep(0.05)
 
     assert repo.get_by_id(white.id).rating == 1184
     assert repo.get_by_id(black.id).rating == 1216
 
 
-def test_publishes_rating_updated_events_when_a_message_bus_is_given():
+async def test_publishes_rating_updated_events_when_a_message_bus_is_given():
     repo = make_repository()
     white = repo.create_user("alice", "hunter2")
     black = repo.create_user("bob", "hunter2")
@@ -123,7 +140,7 @@ def test_publishes_rating_updated_events_when_a_message_bus_is_given():
     assert {event.user_id for event in received} == {white.id, black.id}
 
 
-def test_a_game_ending_without_a_definite_winner_does_not_rate():
+async def test_a_game_ending_without_a_definite_winner_does_not_rate():
     repo = make_repository()
     white = repo.create_user("alice", "hunter2")
     black = repo.create_user("bob", "hunter2")

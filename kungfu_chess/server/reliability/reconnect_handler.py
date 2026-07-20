@@ -14,6 +14,7 @@ this handler shouldn't need to know that split; whoever composes the
 real server supplies one callable that covers both."""
 from __future__ import annotations
 
+import asyncio
 from typing import Callable, Iterable, Optional, Tuple
 
 from kungfu_chess.server.auth.session_manager import SessionManager
@@ -37,8 +38,17 @@ class ReconnectHandler:
         """Returns `(session, role)` on a successful reconnection, or
         None if `token` doesn't resolve to an account with a pending
         disconnect anywhere -- the caller should then fall through to
-        normal fresh-connection handling."""
-        user_id = self._session_manager.resolve(token)
+        normal fresh-connection handling.
+
+        The structural rebind (cancel the grace timer, re-seat the
+        connection) happens synchronously here, but the snapshot/
+        `reconnected` broadcast are only *scheduled*, not awaited --
+        callers typically still need to send their own protocol-level
+        ack (e.g. `auth_response`) after this returns, and that ack
+        should reach the client first. Awaiting the sends here would
+        deliver them before the caller ever gets a chance to send its
+        own ack."""
+        user_id = await asyncio.to_thread(self._session_manager.resolve, token)
         if user_id is None:
             return None
 
@@ -49,17 +59,25 @@ class ReconnectHandler:
 
             session.cancel_disconnect(role)
             session.rebind_player(role, connection)
-            await session.send_snapshot_to(connection)
-
-            envelope = make_envelope("reconnected", {"role": role.value}, session.network_config)
-            await session.broadcast(envelope)
-
-            if self._message_bus is not None:
-                self._message_bus.publish(ReconnectedEvent(game_id=session.game_id, user_id=user_id))
-
+            asyncio.ensure_future(self._notify_reconnected(session, connection, role, user_id))
             return session, role
 
         return None
+
+    async def _notify_reconnected(self, session: GameSession, connection: object,
+                                   role: PlayerRole, user_id: int) -> None:
+        await session.send_snapshot_to(connection)
+        # The reconnecting client already learns the game resumed from its
+        # own auth_response (reconnected=True); only everyone *else*
+        # (opponent, spectators) needs telling -- broadcasting to the
+        # reconnecting connection too would be a redundant message that
+        # also lands unpredictably in its own reply stream.
+        envelope = make_envelope("reconnected", {"role": role.value}, session.network_config)
+        for other in session.all_connections:
+            if other is not connection:
+                await session.send_to(other, envelope)
+        if self._message_bus is not None:
+            self._message_bus.publish(ReconnectedEvent(game_id=session.game_id, user_id=user_id))
 
     @staticmethod
     def _pending_role_for(session: GameSession, user_id: int) -> Optional[PlayerRole]:

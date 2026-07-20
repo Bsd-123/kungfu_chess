@@ -56,6 +56,9 @@ class QueueManager:
         asyncio.ensure_future(self._timeout_after(entry))
         return entry
 
+    def is_queued(self, connection: object) -> bool:
+        return any(entry.connection is connection for entry in self._queue)
+
     def cancel(self, connection: object) -> bool:
         """Removes a still-waiting entry (player pressed cancel, or
         disconnected while searching). Returns False if the connection
