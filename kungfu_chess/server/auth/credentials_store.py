@@ -40,6 +40,20 @@ class SqliteUserRepository:
         ).fetchone()
         return User(*row) if row is not None else None
 
+    def get_by_id(self, user_id: int) -> Optional[User]:
+        row = self._conn.execute(
+            "SELECT id, username, rating FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return User(*row) if row is not None else None
+
+    def update_rating(self, user_id: int, new_rating: int) -> None:
+        """The only write this repository performs outside registration
+        (Decision 10: rating is the one mutable, ongoing-persistence
+        column on `users`); called by RatingUpdateService after a
+        completed game."""
+        self._conn.execute("UPDATE users SET rating = ? WHERE id = ?", (new_rating, user_id))
+        self._conn.commit()
+
     def create_user(self, username: str, plaintext_password: str) -> User:
         password_hash, password_salt = hash_password(plaintext_password, self._auth_config)
         try:

@@ -48,3 +48,21 @@ def test_verify_password_rejects_wrong_password():
 def test_verify_password_rejects_unknown_username():
     repo = make_repository()
     assert repo.verify_password("nobody", "hunter2") is None
+
+
+def test_get_by_id_returns_none_when_absent():
+    repo = make_repository()
+    assert repo.get_by_id(999) is None
+
+
+def test_get_by_id_round_trips_a_created_user():
+    repo = make_repository()
+    created = repo.create_user("alice", "hunter2")
+    assert repo.get_by_id(created.id) == created
+
+
+def test_update_rating_persists_the_new_value():
+    repo = make_repository(RatingConfig(base_rating=1200))
+    created = repo.create_user("alice", "hunter2")
+    repo.update_rating(created.id, 1216)
+    assert repo.get_by_id(created.id).rating == 1216

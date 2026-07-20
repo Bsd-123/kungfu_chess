@@ -57,6 +57,24 @@ class GameSession:
         self._clock = clock
         self.white_connection: Optional[object] = None
         self.black_connection: Optional[object] = None
+
+        # Account identity per color (Phase 3's session tokens resolve to
+        # a user_id one layer up, in the connection handshake). Persists
+        # for the GameSession's lifetime, independent of connection
+        # churn, so a disconnect never loses "who was playing this
+        # color" -- RatingUpdateService (Phase 4) and forfeit handling
+        # (Phase 6) both need it after the socket is long gone. None for
+        # an anonymous/offline-style session, in which case rating
+        # simply does not apply (see RatingUpdateService).
+        self.white_user_id: Optional[int] = None
+        self.black_user_id: Optional[int] = None
+
+        # Guards against applying an ELO update twice for the same game
+        # (a retried or double-fired GameEndedEvent) -- checked and
+        # flipped by RatingUpdateService, discarded with the rest of
+        # this GameSession once it's torn down (not persisted).
+        self.rating_applied: bool = False
+
         self._tick_task: Optional[asyncio.Task] = None
 
     # -- player admission (structural only; capacity policy lives in the
@@ -71,13 +89,19 @@ class GameSession:
     def is_full(self) -> bool:
         return self.white_connection is not None and self.black_connection is not None
 
-    def add_player(self, connection: object) -> PlayerRole:
-        """First joiner is White, second is Black (per the directive)."""
+    def add_player(self, connection: object, user_id: Optional[int] = None) -> PlayerRole:
+        """First joiner is White, second is Black (per the directive).
+        `user_id` is optional -- omitted by callers that don't yet have
+        an authenticated identity for this connection (e.g. today's
+        Phase 2 ad hoc join flow); rating simply won't apply to those
+        sessions (see RatingUpdateService)."""
         if self.white_connection is None:
             self.white_connection = connection
+            self.white_user_id = user_id
             return PlayerRole.WHITE
         if self.black_connection is None:
             self.black_connection = connection
+            self.black_user_id = user_id
             return PlayerRole.BLACK
         raise SessionFullError(self.game_id)
 

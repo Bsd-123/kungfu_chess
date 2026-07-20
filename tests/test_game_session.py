@@ -69,6 +69,26 @@ def test_remove_player_frees_the_slot():
     assert session.white_connection is None
 
 
+def test_add_player_records_the_optional_user_id_per_role():
+    session = make_session()
+    conn_a, conn_b = FakeConnection('a'), FakeConnection('b')
+    session.add_player(conn_a, user_id=7)
+    session.add_player(conn_b, user_id=9)
+    assert session.white_user_id == 7
+    assert session.black_user_id == 9
+
+
+def test_add_player_without_a_user_id_defaults_to_none():
+    session = make_session()
+    session.add_player(FakeConnection('a'))
+    assert session.white_user_id is None
+
+
+def test_rating_applied_defaults_to_false():
+    session = make_session()
+    assert session.rating_applied is False
+
+
 def test_connections_lists_only_occupied_slots():
     session = make_session()
     assert session.connections == []

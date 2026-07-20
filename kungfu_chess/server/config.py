@@ -47,10 +47,21 @@ class AuthenticationConfig:
 @dataclass(frozen=True)
 class RatingConfig:
     # Seed rating for a brand-new account (Decision 10's `users.rating`
-    # default). Phase 4 extends this dataclass with k_factor and the
-    # matchmaking ELO band -- kept minimal here since only base_rating
-    # is needed until matchmaking exists.
+    # default).
     base_rating: int = 1200
+
+    # Decision 4: a single fixed K-factor, no variable/dynamic scaling.
+    k_factor: int = 32
+
+
+@dataclass(frozen=True)
+class MatchmakingConfig:
+    # Decision 13: this band is fixed for the whole search window -- it
+    # never widens the longer a player waits.
+    elo_band: int = 100
+
+    # Decision 5: on expiry the client returns to idle; no auto-retry.
+    timeout_s: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -59,3 +70,4 @@ class ServerConfig:
     game: GameConfig = field(default_factory=GameConfig)
     authentication: AuthenticationConfig = field(default_factory=AuthenticationConfig)
     rating: RatingConfig = field(default_factory=RatingConfig)
+    matchmaking: MatchmakingConfig = field(default_factory=MatchmakingConfig)
