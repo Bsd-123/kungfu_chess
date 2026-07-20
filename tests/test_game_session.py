@@ -275,3 +275,62 @@ async def test_tick_loop_advances_clock_only_while_active():
         await asyncio.sleep(0.01)
     session.stop()
     assert len(sent) > 0
+
+
+def test_rebind_player_reseats_the_role_without_touching_user_id():
+    session = make_session()
+    old_conn = FakeConnection('old')
+    new_conn = FakeConnection('new')
+    session.add_player(old_conn, user_id=7)
+
+    session.rebind_player(PlayerRole.WHITE, new_conn)
+
+    assert session.white_connection is new_conn
+    assert session.white_user_id == 7
+
+
+def test_has_pending_disconnect_is_false_by_default():
+    session = make_session()
+    assert session.has_pending_disconnect(PlayerRole.WHITE) is False
+
+
+async def test_mark_disconnected_then_cancel_prevents_on_expire():
+    session = make_session()
+    fired = []
+    session.mark_disconnected(PlayerRole.WHITE, grace_period_ms=30, on_expire=lambda: fired.append(True))
+
+    assert session.has_pending_disconnect(PlayerRole.WHITE) is True
+    cancelled = session.cancel_disconnect(PlayerRole.WHITE)
+    await asyncio.sleep(0.06)
+
+    assert cancelled is True
+    assert session.has_pending_disconnect(PlayerRole.WHITE) is False
+    assert fired == []
+
+
+async def test_mark_disconnected_calls_on_expire_after_the_grace_period():
+    session = make_session()
+    fired = []
+    session.mark_disconnected(PlayerRole.WHITE, grace_period_ms=30, on_expire=lambda: fired.append(True))
+
+    await asyncio.sleep(0.08)
+
+    assert fired == [True]
+    assert session.has_pending_disconnect(PlayerRole.WHITE) is False
+
+
+def test_cancel_disconnect_with_nothing_pending_returns_false():
+    session = make_session()
+    assert session.cancel_disconnect(PlayerRole.BLACK) is False
+
+
+async def test_stop_cancels_any_pending_disconnect_timer():
+    session = make_session()
+    fired = []
+    session.mark_disconnected(PlayerRole.WHITE, grace_period_ms=30, on_expire=lambda: fired.append(True))
+
+    session.stop()
+    await asyncio.sleep(0.06)
+
+    assert fired == []
+    assert session.has_pending_disconnect(PlayerRole.WHITE) is False

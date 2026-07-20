@@ -24,3 +24,7 @@ git switch -c your-new-branch-name
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Phase 6: local NDJSON structured logs and their rotated backups
+*.ndjson
+*.ndjson.*

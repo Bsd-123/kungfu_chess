@@ -7,6 +7,7 @@ Events. Frozen dataclasses of primitives only, same convention as
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -26,3 +27,22 @@ class RatingUpdatedEvent:
     user_id: int
     old_rating: int
     new_rating: int
+
+
+@dataclass(frozen=True)
+class PlayerDisconnectedEvent:
+    game_id: str
+    user_id: Optional[int]
+    grace_period_ms: int
+
+
+@dataclass(frozen=True)
+class ReconnectedEvent:
+    game_id: str
+    user_id: int
+
+
+@dataclass(frozen=True)
+class PlayerForfeitedEvent:
+    game_id: str
+    user_id: Optional[int]

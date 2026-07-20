@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from enum import Enum
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from kungfu_chess.engine.game_engine import GameEngine
 from kungfu_chess.engine.move_reasons import MoveReasons
@@ -91,6 +91,13 @@ class GameSession:
 
         self._tick_task: Optional[asyncio.Task] = None
 
+        # Decision 7: a disconnected player's 20-second reconnect grace
+        # timer, keyed by role and stored here rather than in a separate
+        # parallel map (see disconnect_monitor.py's module docstring) --
+        # `role in self._disconnect_tasks` is exactly "this color has a
+        # pending disconnect, still resumable."
+        self._disconnect_tasks: Dict[PlayerRole, asyncio.Task] = {}
+
     # -- player admission (structural only; capacity policy lives in the
     # caller -- see module docstring and SessionFullError) --------------
     def role_for(self, connection: object) -> Optional[PlayerRole]:
@@ -124,6 +131,47 @@ class GameSession:
             self.white_connection = None
         elif self.black_connection is connection:
             self.black_connection = None
+
+    def rebind_player(self, role: PlayerRole, connection: object) -> None:
+        """Reconnection (Decision 7): re-seats `role` with a new socket,
+        same color assignment, same GameEngine reference -- the game
+        resumes from its exact current state. Does not touch
+        `white_user_id`/`black_user_id`, which never changed."""
+        if role is PlayerRole.WHITE:
+            self.white_connection = connection
+        else:
+            self.black_connection = connection
+
+    # -- disconnect grace period (Decision 7) -----------------------------
+    def mark_disconnected(self, role: PlayerRole, grace_period_ms: int,
+                           on_expire: Callable[[], None]) -> None:
+        """Starts (or restarts) `role`'s reconnect grace timer. The
+        engine is never paused for this -- a piece's in-flight motion or
+        cooldown keeps counting down in real time, consistent with this
+        being a real-time game, not a turn-based one."""
+        self.cancel_disconnect(role)
+
+        async def _grace_timer() -> None:
+            try:
+                await asyncio.sleep(grace_period_ms / 1000)
+            except asyncio.CancelledError:
+                return
+            self._disconnect_tasks.pop(role, None)
+            on_expire()
+
+        self._disconnect_tasks[role] = asyncio.ensure_future(_grace_timer())
+
+    def cancel_disconnect(self, role: PlayerRole) -> bool:
+        """Cancels a pending grace timer (a reconnect arrived in time).
+        Returns whether one was actually pending."""
+        task = self._disconnect_tasks.pop(role, None)
+        if task is not None:
+            task.cancel()
+            return True
+        return False
+
+    def has_pending_disconnect(self, role: PlayerRole) -> bool:
+        return role in self._disconnect_tasks
 
     @property
     def connections(self) -> List[object]:
@@ -212,6 +260,9 @@ class GameSession:
         if self._tick_task is not None:
             self._tick_task.cancel()
             self._tick_task = None
+        # A torn-down session must never let a stray forfeit fire later.
+        for role in list(self._disconnect_tasks):
+            self.cancel_disconnect(role)
 
     async def _tick_loop(self) -> None:
         """Mirrors `ui/game_loop.py::run_loop`'s shape (advance clock,

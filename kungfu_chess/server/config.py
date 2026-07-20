@@ -4,6 +4,7 @@ phase's server modules depend only on the specific config type they
 need -- `server/protocol.py` takes a `NetworkConfig`, not the whole
 `ServerConfig`."""
 from __future__ import annotations
+import logging
 from dataclasses import dataclass, field
 
 from kungfu_chess.config import GameConfig
@@ -76,6 +77,24 @@ class RoomConfig:
 
 
 @dataclass(frozen=True)
+class ReliabilityConfig:
+    # Decision 7: 20 seconds to reconnect and resume the exact same game
+    # state before an auto-forfeit.
+    disconnect_grace_period_ms: int = 20_000
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    # Decision 11: NDJSON, local files only. Rotation is a required
+    # implementation detail (Phase 6 risk: unbounded log growth), not an
+    # optional nice-to-have.
+    log_file_path: str = "kungfu_chess_server.ndjson"
+    max_bytes: int = 5_000_000
+    backup_count: int = 5
+    level: int = logging.INFO
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     game: GameConfig = field(default_factory=GameConfig)
@@ -83,3 +102,5 @@ class ServerConfig:
     rating: RatingConfig = field(default_factory=RatingConfig)
     matchmaking: MatchmakingConfig = field(default_factory=MatchmakingConfig)
     room: RoomConfig = field(default_factory=RoomConfig)
+    reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
